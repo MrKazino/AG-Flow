@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-extras --locked
+      - name: Lint
+        run: uv run ruff check src tests scripts
+      - name: Tests
+        run: uv run pytest -q
+      - name: Validate bundled plugin
+        run: uv run agflow doctor --path plugin --strict
+      - name: Validate graphs
+        run: uv run agflow graph validate plugin/graphs/*.yaml
+      - name: Dry-run every bundled graph
+        run: |
+          set -e
+          ws=$(mktemp -d)
+          uv run agflow graph run feature-delivery -i feature=demo -i has_ui=true --backend fake --approve-human -w "$ws"
+          uv run agflow graph run bugfix -i bug=demo --backend fake -w "$ws"
+          uv run agflow graph run security-sweep --backend fake --approve-human -w "$ws"
+          uv run agflow graph run ui-feature -i feature=demo --backend fake --approve-human -w "$ws"
+          uv run agflow graph run release -i version=0.0.0 --backend fake --approve-human -w "$ws"
+      - name: Build wheel
+        run: uv build --wheel
+
+  installer:
+    # Runs the real easy-installer.bat on every OS, starting WITHOUT uv so the bootstrap path is exercised.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run easy-installer.bat (Windows, cmd.exe)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: easy-installer.bat --yes
+      - name: Run easy-installer.bat (Linux/macOS, sh)
+        if: runner.os != 'Windows'
+        run: sh easy-installer.bat --yes
+      - name: Put uv's tool directory on PATH for the next steps
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then cygpath -w "$USERPROFILE/.local/bin" >> "$GITHUB_PATH"; else echo "$HOME/.local/bin" >> "$GITHUB_PATH"; fi
+      - name: Use the installed agflow
+        shell: bash
+        run: |
+          agflow version
+          agflow doctor
+          ws=$(mktemp -d)
+          agflow graph run bugfix -i bug=demo --backend fake -w "$ws"
+      - name: Reinstall while agflow is running (Windows file-lock scenario)
+        # Reproduces "failed to remove directory ...\\uv\\tools\\agflow\\Scripts: Access is denied (os error 5)":
+        # a running agflow (like Antigravity's MCP server) locks its files; the installer must stop it and succeed.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath agflow -ArgumentList 'dashboard','--no-browser','--port','8799' -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) { throw "agflow dashboard did not stay running" }
+          cmd /c easy-installer.bat --yes
+          if ($LASTEXITCODE -ne 0) { throw "reinstall failed while agflow was running" }
+          Start-Sleep -Seconds 2
+          if (-not $p.HasExited) { throw "the running agflow process was not stopped" }
+          agflow version
+      - name: Uninstall
+        if: runner.os != 'Windows'
+        run: sh easy-installer.bat --uninstall --yes
+      - name: Uninstall (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: easy-installer.bat --uninstall --yes

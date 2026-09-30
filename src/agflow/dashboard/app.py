@@ -1,0 +1,392 @@
+"""agflow dashboard: a local, token-protected web UI over the same modules the CLI uses."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import secrets
+import time
+import webbrowser
+from pathlib import Path
+from typing import Any
+
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from agflow import __version__, mcp_registry, paths, toggles
+from agflow.fsutil import atomic_write_text, backup, timestamp
+from agflow.graph import catalog, engine
+from agflow.graph.render import to_mermaid
+from agflow.graph.schema import GraphError, parse_graph_text
+from agflow.graph.store import RunNotFound, RunStore
+from agflow.inventory import Inventory
+from agflow.models import Kind
+from agflow.validate import summarize, validate_inventory
+
+STATIC = Path(__file__).parent / "static"
+ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "testserver"}
+TOKEN_HEADER = "x-agflow-token"
+
+
+def graph_layout(graph: Any) -> dict[str, Any]:
+    """Nodes/edges for the SVG renderer: layer = longest path from a root."""
+    layer: dict[str, int] = {}
+    for n in graph.nodes:  # nodes are validated acyclic; resolve lazily
+        def depth(nid: str) -> int:
+            if nid not in layer:
+                deps = graph.node(nid).depends_on
+                layer[nid] = 0 if not deps else 1 + max(depth(d) for d in deps)
+            return layer[nid]
+
+        depth(n.id)
+    return {
+        "id": graph.id,
+        "title": graph.title,
+        "description": graph.description,
+        "inputs": {k: v.model_dump() for k, v in graph.inputs.items()},
+        "nodes": [{"id": n.id, "type": n.type, "title": n.label, "agent": n.agent, "skill": n.skill,
+                   "when": n.when, "layer": layer[n.id]} for n in graph.nodes],
+        "edges": [{"from": d, "to": n.id, "kind": "dep"} for n in graph.nodes for d in n.depends_on]
+        + [{"from": n.id, "to": n.on_fail.goto, "kind": "rework", "max_loops": n.on_fail.max_loops}
+           for n in graph.nodes if n.on_fail],
+    }
+
+
+def create_app(workspace: Path, token: str) -> FastAPI:
+    app = FastAPI(title="agflow dashboard", version=__version__, docs_url=None, redoc_url=None)
+    ws = workspace.resolve()
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next: Any) -> Any:
+        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
+        if host not in ALLOWED_HOSTS:
+            return JSONResponse({"detail": "forbidden host"}, status_code=403)
+        if request.url.path.startswith("/api/"):
+            given = request.headers.get(TOKEN_HEADER) or request.query_params.get("token", "")
+            if not secrets.compare_digest(given, token):
+                return JSONResponse({"detail": "missing or invalid token"}, status_code=401)
+        return await call_next(request)
+
+    def inventory() -> Inventory:
+        return Inventory.discover(ws)
+
+    # -- overview & doctor -------------------------------------------------------------------
+    @app.get("/api/overview")
+    def overview() -> dict[str, Any]:
+        from agflow.install import status as install_status
+
+        inv = inventory()
+        issues = validate_inventory(inv)
+        return {
+            "version": __version__,
+            "workspace": str(ws),
+            "install": install_status(ws),
+            "counts": {k.value: {"enabled": len(inv.of(k)), "disabled": len(inv.of(k, enabled=False))}
+                       for k in Kind},
+            "doctor": summarize(issues),
+            "active_runs": [_run_brief(r) for r in RunStore(ws).active()],
+            "gemini_md_limit": paths.GEMINI_MD_CHAR_LIMIT,
+        }
+
+    @app.get("/api/doctor")
+    def doctor() -> dict[str, Any]:
+        issues = validate_inventory(inventory())
+        return {"counts": summarize(issues), "issues": [i.to_dict() for i in issues]}
+
+    # -- fix (same engine as `agflow fix`: preview, choose, apply, undo) ------------------------
+    @app.get("/api/fix/plan")
+    def fix_plan() -> dict[str, Any]:
+        from agflow import fixes
+
+        hist = fixes.history()
+        return {**fixes.build_plan(ws).to_dict(),
+                "last_batch": {k: hist[0][k] for k in ("id", "time", "fixes", "backup_dir")} if hist else None}
+
+    @app.post("/api/fix/apply")
+    def fix_apply(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        from agflow import fixes
+
+        selections = body.get("selections")
+        if not isinstance(selections, dict) or not selections or not all(
+                isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in selections.items()):
+            raise HTTPException(400, "selections must be a non-empty object {fix_id: option_id or null}")
+        return fixes.apply(ws, selections).to_dict()
+
+    @app.post("/api/fix/undo")
+    def fix_undo() -> dict[str, Any]:
+        from agflow import fixes
+
+        try:
+            return fixes.undo_last()
+        except fixes.FixError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/fix/history")
+    def fix_history() -> list[dict[str, Any]]:
+        from agflow import fixes
+
+        return [{k: h.get(k) for k in ("id", "time", "workspace", "fixes", "backup_dir")} for h in fixes.history()]
+
+    # -- components ---------------------------------------------------------------------------
+    @app.get("/api/items")
+    def items(kind: str | None = None) -> list[dict[str, Any]]:
+        inv = inventory()
+        return [i.to_dict() for i in inv.items if kind is None or i.kind.value == kind]
+
+    @app.get("/api/file")
+    def read_file(path: str) -> dict[str, Any]:
+        p = Path(path).resolve()
+        known = {i.path.resolve() for i in inventory().items}
+        if p not in known or not p.is_file():
+            raise HTTPException(404, "not a known component file")
+        text = p.read_text(encoding="utf-8")
+        return {"path": str(p), "content": text, "chars": len(text)}
+
+    @app.post("/api/items/{kind}/{name}/toggle")
+    def toggle(kind: str, name: str, enabled: bool = Body(..., embed=True)) -> dict[str, Any]:
+        try:
+            k = Kind(kind)
+            inv = inventory()
+            where = toggles.enable(inv, k, name) if enabled else toggles.disable(inv, k, name)
+        except (ValueError, toggles.ToggleError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "path": str(where)}
+
+    @app.get("/api/gemini-md")
+    def get_gemini_md() -> dict[str, Any]:
+        p = paths.global_layout().gemini_md
+        assert p is not None
+        text = p.read_text(encoding="utf-8") if p.exists() else ""
+        return {"path": str(p), "content": text, "chars": len(text), "limit": paths.GEMINI_MD_CHAR_LIMIT}
+
+    @app.put("/api/gemini-md")
+    def put_gemini_md(content: str = Body(..., embed=True)) -> dict[str, Any]:
+        if len(content) > paths.GEMINI_MD_CHAR_LIMIT:
+            raise HTTPException(400, f"{len(content)} chars exceeds the {paths.GEMINI_MD_CHAR_LIMIT}-char cap")
+        p = paths.global_layout().gemini_md
+        assert p is not None
+        if p.exists():
+            backup(p, paths.backups_dir() / timestamp(), paths.home())
+        atomic_write_text(p, content)
+        return {"ok": True, "chars": len(content)}
+
+    # -- MCP ----------------------------------------------------------------------------------
+    @app.get("/api/mcp")
+    def mcp_list() -> dict[str, Any]:
+        servers = []
+        for i in inventory().of(Kind.MCP, enabled=None):
+            cfg = i.meta.get("config", {})
+            servers.append({**i.to_dict(), "missing_env": mcp_registry.missing_env(cfg, dict(os.environ)),
+                            "editable": i.scope in ("global", "workspace")})
+        return {"servers": servers, "catalog": mcp_registry.CATALOG}
+
+    @app.post("/api/mcp")
+    def mcp_add(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            f = mcp_registry.config_file(body.get("scope", "global"), ws)
+            spec = mcp_registry.add_server(f, body["name"], command=body.get("command") or None,
+                                           args=body.get("args") or [], env=body.get("env") or None,
+                                           url=body.get("url") or None, replace=bool(body.get("replace")))
+        except (KeyError, mcp_registry.McpError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "spec": spec}
+
+    @app.post("/api/mcp/{scope}/{name}/toggle")
+    def mcp_toggle(scope: str, name: str, enabled: bool = Body(..., embed=True)) -> dict[str, Any]:
+        try:
+            mcp_registry.set_enabled(mcp_registry.config_file(scope, ws), name, enabled)
+        except mcp_registry.McpError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True}
+
+    @app.delete("/api/mcp/{scope}/{name}")
+    def mcp_remove(scope: str, name: str) -> dict[str, Any]:
+        try:
+            mcp_registry.remove_server(mcp_registry.config_file(scope, ws), name)
+        except mcp_registry.McpError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True}
+
+    # -- profiles, install, migrate --------------------------------------------------------------
+    @app.get("/api/profiles")
+    def profiles() -> dict[str, Any]:
+        from agflow.profiles import load_profiles, resolve_profile
+
+        out = {}
+        for name, spec in load_profiles(None, ws).items():
+            try:
+                resolved = resolve_profile(name, None, ws)
+            except Exception as exc:  # show broken profiles instead of failing the page
+                resolved = {"error": str(exc)}
+            out[name] = {"description": (spec or {}).get("description", ""), **resolved}
+        return out
+
+    @app.post("/api/profiles/{name}/apply")
+    def profile_apply(name: str) -> dict[str, Any]:
+        from agflow.profiles import ProfileError, resolve_profile
+
+        try:
+            actions = toggles.apply_profile(ws, resolve_profile(name, None, ws))
+        except (ProfileError, toggles.ToggleError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "actions": actions}
+
+    @app.post("/api/install")
+    def do_install(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from agflow.install import InstallError, install
+        from agflow.profiles import ProfileError
+
+        scope = body.get("scope", "global")
+        try:
+            plan = install(scope, ws, profile=body.get("profile") or None, dry_run=bool(body.get("dry_run")),
+                           allow_duplicate=bool(body.get("allow_duplicate")))
+        except (InstallError, ProfileError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "actions": plan.actions, "warnings": plan.warnings}
+
+    @app.post("/api/uninstall")
+    def do_uninstall(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from agflow.install import InstallError, uninstall
+
+        scope = body.get("scope", "global")
+        try:
+            plan = uninstall(scope, ws if scope == "workspace" else None, dry_run=bool(body.get("dry_run")))
+        except InstallError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "actions": plan.actions}
+
+    @app.post("/api/migrate")
+    def do_migrate(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from agflow.migrate import migrate_all
+
+        report = migrate_all(ws, dry_run=bool(body.get("dry_run", True)))
+        return {"ok": True, "actions": report.actions, "conflicts": report.conflicts}
+
+    # -- graphs ---------------------------------------------------------------------------------
+    @app.get("/api/graphs")
+    def graphs() -> list[dict[str, Any]]:
+        return [{"id": r.id, "title": r.title, "description": r.description, "source": r.source,
+                 "path": str(r.path), "error": r.error} for r in catalog.list_graphs(ws)]
+
+    @app.get("/api/graphs/{graph_id}")
+    def graph_detail(graph_id: str) -> dict[str, Any]:
+        try:
+            g, p = catalog.resolve(graph_id, ws)
+        except GraphError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"path": str(p), "yaml": p.read_text(encoding="utf-8"), "layout": graph_layout(g),
+                "mermaid": to_mermaid(g), "editable": _is_workspace_graph(p)}
+
+    @app.post("/api/graphs/validate")
+    def graph_validate(yaml: str = Body(..., embed=True)) -> dict[str, Any]:
+        try:
+            g = parse_graph_text(yaml)
+        except GraphError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "layout": graph_layout(g), "mermaid": to_mermaid(g)}
+
+    @app.put("/api/graphs/{graph_id}")
+    def graph_save(graph_id: str, yaml: str = Body(..., embed=True)) -> dict[str, Any]:
+        try:
+            g = parse_graph_text(yaml)
+        except GraphError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if g.id != graph_id:
+            raise HTTPException(400, f"graph id in YAML ({g.id}) must match the URL ({graph_id})")
+        target = paths.workspace_layout(ws).graphs_dir / f"{g.id}.yaml"  # type: ignore[operator]
+        atomic_write_text(target, yaml)
+        return {"ok": True, "path": str(target)}
+
+    def _is_workspace_graph(p: Path) -> bool:
+        gd = paths.workspace_layout(ws).graphs_dir
+        return gd is not None and p.parent.resolve() == gd.resolve()
+
+    # -- runs -------------------------------------------------------------------------------------
+    @app.get("/api/runs")
+    def runs() -> list[dict[str, Any]]:
+        return [_run_brief(r) for r in RunStore(ws).list()[:100]]
+
+    def _run_detail(run_id: str) -> dict[str, Any]:
+        store = RunStore(ws)
+        try:
+            state = store.load(run_id)
+        except RunNotFound as exc:
+            raise HTTPException(404, f"unknown run {run_id}") from exc
+        g = state.graph_model()
+        return {**engine.status_view(g, state, verbose=True), "layout": graph_layout(g),
+                "ledger": store.read_ledger(run_id, limit=200), "updated_at": state.updated_at}
+
+    @app.get("/api/runs/{run_id}")
+    def run_detail(run_id: str) -> dict[str, Any]:
+        return _run_detail(run_id)
+
+    @app.get("/api/runs/{run_id}/stream")
+    async def run_stream(run_id: str, request: Request) -> StreamingResponse:
+        store = RunStore(ws)
+        if not store.exists(run_id):
+            raise HTTPException(404, f"unknown run {run_id}")
+        state_file = store.run_dir(run_id) / "state.json"
+
+        async def events() -> Any:
+            last = None
+            deadline = time.time() + 3600
+            while time.time() < deadline and not await request.is_disconnected():
+                mtime = state_file.stat().st_mtime if state_file.exists() else None
+                if mtime != last:
+                    last = mtime
+                    yield f"data: {json.dumps(_run_detail(run_id), default=str)}\n\n"
+                else:
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(1.0)
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/runs/{run_id}/approve")
+    def run_approve(run_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        from agflow.runner.runner import approve
+
+        try:
+            events = approve(RunStore(ws), run_id, body["node"], approved=bool(body.get("approved", True)),
+                             note=body.get("note", ""))
+        except (KeyError, RunNotFound, engine.EngineError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "events": events}
+
+    @app.post("/api/runs/{run_id}/abort")
+    def run_abort(run_id: str, reason: str = Body("aborted from dashboard", embed=True)) -> dict[str, Any]:
+        store = RunStore(ws)
+        try:
+            with store.transaction(run_id) as state:
+                engine.abort(state, reason, now=time.time())
+        except RunNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
+        store.ledger(run_id, {"event": "aborted", "reason": reason})
+        return {"ok": True}
+
+    # -- static UI ----------------------------------------------------------------------------------
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    @app.get("/")
+    def index() -> FileResponse:
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+
+    return app
+
+
+def _run_brief(r: engine.RunState) -> dict[str, Any]:
+    return {"run_id": r.run_id, "graph_id": r.graph_id, "status": r.status, "counts": engine.counts(r),
+            "created_at": r.created_at, "updated_at": r.updated_at}
+
+
+def serve(workspace: Path, *, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
+    import uvicorn
+
+    token = os.environ.get("AGFLOW_DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
+    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}/#token={token}"
+    print(f"agflow dashboard for {workspace}\n  {url}\n  (Ctrl+C to stop)", flush=True)
+    if open_browser:
+        webbrowser.open(url)
+    uvicorn.run(create_app(workspace, token), host=host, port=port, log_level="warning")

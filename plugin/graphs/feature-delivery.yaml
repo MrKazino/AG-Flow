@@ -1,0 +1,107 @@
+id: feature-delivery
+version: 1
+title: Feature delivery
+description: Spec, parallel implementation and acceptance tests, parallel review and security audit with a rework gate, optional browser verification, human approval, then release notes.
+inputs:
+  feature:
+    type: string
+    required: true
+    description: The feature to build, in the user's words
+  has_ui:
+    type: boolean
+    default: false
+    description: Whether the feature changes the user interface
+  constraints:
+    type: string
+    default: ""
+    description: Extra constraints (deadlines, compatibility, performance targets)
+defaults:
+  retries: 1
+  timeout_min: 45
+  max_parallel: 3
+nodes:
+  - id: spec
+    title: Write the spec
+    agent: architect
+    skill: plan-spec
+    prompt: |
+      Write a spec and implementation plan for this feature:
+      {{ inputs.feature }}
+      {% if inputs.constraints %}Constraints: {{ inputs.constraints }}{% endif %}
+      Save it to the expected output path. Acceptance criteria must be runnable checks.
+    outputs: ["docs/specs/{{ run.id }}.md"]
+    acceptance:
+      - Spec covers design, files to change, test plan and runnable acceptance criteria
+      - Open questions are listed explicitly
+
+  - id: implement
+    title: Implement test-first
+    agent: implementer
+    skill: tdd
+    depends_on: [spec]
+    prompt: |
+      Implement the feature exactly as specified in {{ nodes.spec.outputs[0] }}.
+      Work test-first; keep the diff minimal and consistent with the codebase.
+    acceptance:
+      - Unit tests for every new behaviour, seen failing then passing
+      - Formatter, linter, typecheck and the full test suite pass
+
+  - id: acceptance-tests
+    title: Write acceptance tests
+    agent: tester
+    depends_on: [spec]
+    prompt: |
+      From the acceptance criteria in {{ nodes.spec.outputs[0] }}, write acceptance/integration tests
+      that exercise the feature through its public interface. Do not edit production code.
+      Tests for behaviour that is not implemented yet may fail; list them.
+    acceptance:
+      - Every acceptance criterion maps to at least one test
+
+  - id: review
+    title: Code review
+    agent: reviewer
+    skill: code-review
+    depends_on: [implement, acceptance-tests]
+    prompt: |
+      Review the working-tree changes (git diff) against the spec {{ nodes.spec.outputs[0] }}.
+      Run the full test suite including the new acceptance tests. Approve only if every acceptance
+      criterion is met and there are no blocker/major findings; otherwise report `rejected`.
+
+  - id: security
+    title: Security review of the change
+    agent: security-auditor
+    skill: security-audit
+    depends_on: [implement]
+    prompt: |
+      Security-review only the changed code paths (git diff) for this feature: {{ inputs.feature }}.
+      Report `rejected` if you find any critical or high issue.
+
+  - id: quality-gate
+    type: gate
+    depends_on: [review, security]
+    on_fail: {goto: implement, max_loops: 2}
+
+  - id: ui-verify
+    title: Verify in the browser
+    agent: ui-verifier
+    skill: ui-build-verify
+    depends_on: [quality-gate]
+    when: inputs.has_ui
+    prompt: |
+      Verify the UI of this feature in the browser: {{ inputs.feature }}.
+      Check every flow and state from the spec, the console, 375/768/1280px layouts and keyboard access.
+    outputs: [".agents/agflow/evidence/{{ run.id }}/"]
+
+  - id: approve
+    type: human
+    depends_on: [ui-verify]
+    prompt: "The feature passed review{% if inputs.has_ui %} and browser verification{% endif %}. Approve it for release notes and hand-off?"
+
+  - id: release-notes
+    title: Changelog entry
+    agent: devops
+    skill: release-notes
+    depends_on: [approve]
+    prompt: |
+      Add a user-facing changelog entry (Unreleased section) for: {{ inputs.feature }}.
+      Do not tag or publish anything.

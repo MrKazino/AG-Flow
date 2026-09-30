@@ -1,0 +1,77 @@
+id: security-sweep
+version: 1
+title: Security sweep
+description: Parallel code audit and dependency audit, prioritised triage, human-approved remediation of critical/high findings, verification with a rework gate, and a final security report.
+inputs:
+  scope:
+    type: string
+    default: "."
+    description: Paths or services in scope
+defaults:
+  retries: 1
+  timeout_min: 60
+  max_parallel: 2
+nodes:
+  - id: code-audit
+    title: Code & configuration audit
+    agent: security-auditor
+    skill: security-audit
+    prompt: |
+      Audit {{ inputs.scope }} for vulnerabilities (attack surface, OWASP classes, secrets, misconfiguration).
+      Write the findings report to the expected output path. Do not change code.
+    outputs: ["docs/security/{{ run.id }}-code.md"]
+
+  - id: dependency-audit
+    title: Dependency audit
+    agent: security-auditor
+    skill: dependency-audit
+    prompt: |
+      Audit third-party dependencies in {{ inputs.scope }} for CVEs and license risks.
+      Write the report to the expected output path. Do not upgrade anything yet.
+    outputs: ["docs/security/{{ run.id }}-deps.md"]
+
+  - id: triage
+    title: Prioritise findings
+    agent: architect
+    depends_on: [code-audit, dependency-audit]
+    prompt: |
+      Merge and de-duplicate the findings in {{ nodes["code-audit"].outputs[0] }} and
+      {{ nodes["dependency-audit"].outputs[0] }}. Produce a prioritised remediation plan: critical/high
+      items with concrete fixes and effort; medium/low as backlog. Save it to the expected output path.
+    outputs: ["docs/security/{{ run.id }}-plan.md"]
+
+  - id: approve-remediation
+    type: human
+    depends_on: [triage]
+    prompt: "Security triage is ready (see the plan in docs/security/). Approve remediation of the critical/high findings?"
+
+  - id: remediate
+    title: Fix critical/high findings
+    agent: implementer
+    depends_on: [approve-remediation]
+    prompt: |
+      Fix the critical and high items from {{ nodes.triage.outputs[0] }}, one at a time, each with a
+      regression test where feasible. Keep dependency upgrades minimal (patch/minor first). Run the full suite.
+
+  - id: verify
+    title: Verify remediation
+    agent: security-auditor
+    depends_on: [remediate]
+    prompt: |
+      Re-test every critical/high finding from {{ nodes.triage.outputs[0] }} against the current code and
+      look for sibling instances. Report `rejected` if any remains exploitable.
+
+  - id: gate
+    type: gate
+    depends_on: [verify]
+    on_fail: {goto: remediate, max_loops: 2}
+
+  - id: report
+    title: Final security report
+    agent: researcher
+    skill: docs-writer
+    depends_on: [gate]
+    prompt: |
+      Write the final security report: scope, tools run, findings by severity with status (fixed / accepted /
+      backlog), and recommendations. Use the audit and plan documents as sources.
+    outputs: ["docs/security/{{ run.id }}-report.md"]

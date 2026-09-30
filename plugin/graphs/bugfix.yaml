@@ -1,0 +1,64 @@
+id: bugfix
+version: 1
+title: Bug fix
+description: Reproduce the bug with a failing regression test, fix the root cause, then review and full-suite regression check with a rework gate.
+inputs:
+  bug:
+    type: string
+    required: true
+    description: Bug report, error message or failing behaviour
+  hint:
+    type: string
+    default: ""
+    description: Where to look, repro steps or suspected area
+defaults:
+  retries: 1
+  timeout_min: 40
+  max_parallel: 2
+nodes:
+  - id: reproduce
+    title: Reproduce with a failing test
+    agent: tester
+    skill: debug-systematic
+    prompt: |
+      Reproduce this bug and capture it as a failing regression test (do not fix it):
+      {{ inputs.bug }}
+      {% if inputs.hint %}Hint: {{ inputs.hint }}{% endif %}
+      Report the exact failing command and output. If you cannot reproduce, report `failed` with what you tried.
+    acceptance:
+      - A regression test fails for the reported reason
+
+  - id: fix
+    title: Fix the root cause
+    agent: implementer
+    skill: debug-systematic
+    depends_on: [reproduce]
+    prompt: |
+      Find and fix the root cause of: {{ inputs.bug }}
+      The failing regression test from the reproduce step must pass afterwards. Search for sibling
+      occurrences of the same defect. State the root cause with file:line.
+    acceptance:
+      - Regression test passes; full suite passes
+      - Root cause explained, not just the symptom patched
+
+  - id: review
+    title: Review the fix
+    agent: reviewer
+    skill: code-review
+    depends_on: [fix]
+    prompt: |
+      Review the fix (git diff) for: {{ inputs.bug }}. Is it the root cause? Could it break other callers?
+      Does the regression test fail without the fix? Report `rejected` with required changes if not.
+
+  - id: regression
+    title: Full regression run
+    agent: tester
+    depends_on: [fix]
+    prompt: |
+      Run the complete test suite (and linters/typecheck) and, if the bug was flaky or concurrency
+      related, run the regression test at least 50 times. Report `rejected` on any failure.
+
+  - id: gate
+    type: gate
+    depends_on: [review, regression]
+    on_fail: {goto: fix, max_loops: 2}

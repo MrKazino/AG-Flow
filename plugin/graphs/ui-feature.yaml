@@ -1,0 +1,69 @@
+id: ui-feature
+version: 1
+title: UI feature
+description: UI spec, build with browser verification, then parallel accessibility audit, visual regression and code review behind a rework gate, followed by human sign-off.
+inputs:
+  feature:
+    type: string
+    required: true
+    description: The UI change to build
+  url:
+    type: string
+    default: "http://localhost:3000"
+    description: Where the app runs locally
+defaults:
+  retries: 1
+  timeout_min: 45
+  max_parallel: 3
+nodes:
+  - id: ui-spec
+    title: UI spec
+    agent: architect
+    skill: plan-spec
+    prompt: |
+      Write a UI spec for: {{ inputs.feature }}
+      Cover components to reuse, states (loading/empty/error), responsive behaviour, accessibility
+      requirements and runnable acceptance checks (browser flows).
+    outputs: ["docs/specs/{{ run.id }}-ui.md"]
+
+  - id: build
+    title: Build and verify in browser
+    agent: implementer
+    skill: ui-build-verify
+    depends_on: [ui-spec]
+    prompt: |
+      Build the UI described in {{ nodes["ui-spec"].outputs[0] }}. The app runs at {{ inputs.url }}.
+      Verify every flow in the browser and attach screenshots.
+
+  - id: a11y
+    title: Accessibility audit
+    agent: ui-verifier
+    skill: a11y-audit
+    depends_on: [build]
+    prompt: Audit the new UI at {{ inputs.url }} against WCAG 2.2 AA. Report `rejected` for blockers or serious issues.
+
+  - id: visual
+    title: Visual regression
+    agent: ui-verifier
+    skill: visual-regression
+    depends_on: [build]
+    prompt: |
+      Compare key pages at {{ inputs.url }} with baselines. Classify every diff as intended or regression;
+      report `rejected` for unexplained regressions. Do not bulk-update baselines.
+
+  - id: review
+    title: Code review
+    agent: reviewer
+    skill: code-review
+    depends_on: [build]
+    prompt: Review the UI change (git diff) against {{ nodes["ui-spec"].outputs[0] }}.
+
+  - id: gate
+    type: gate
+    depends_on: [a11y, visual, review]
+    on_fail: {goto: build, max_loops: 2}
+
+  - id: sign-off
+    type: human
+    depends_on: [gate]
+    prompt: "The UI passed accessibility, visual and code review. Screenshots are in .agents/agflow/evidence/. Approve?"

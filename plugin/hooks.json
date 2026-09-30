@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*(command|file|write|replace|edit).*",
+        "command": "agflow hook pre-tool-use"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*(command|file|write|replace|edit|subagent).*",
+        "command": "agflow hook post-tool-use"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "agflow hook stop"
+      }
+    ]
+  }
+}

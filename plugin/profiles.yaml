@@ -1,0 +1,26 @@
+# Workflow profiles: `agflow install --profile <name>` or `agflow profile apply <name>`.
+# A workspace can extend or override these in .agents/agflow/profiles.yaml.
+profiles:
+  full:
+    description: Everything — all skills and all subagents.
+    skills: "*"
+    agents: "*"
+  core:
+    description: Planning, TDD, debugging, review, refactoring, docs and orchestration.
+    skills: [plan-spec, tdd, debug-systematic, code-review, refactor-safely, docs-writer, graph-run, graph-design, workspace-setup]
+    agents: [orchestrator, architect, implementer, tester, reviewer, researcher]
+  secure:
+    description: Core + security audit, dependency audit, performance and coverage.
+    extends: core
+    skills: [security-audit, dependency-audit, perf-profile, coverage-gaps]
+    agents: [security-auditor]
+  frontend:
+    description: Core + UI build with browser verification, accessibility and visual regression.
+    extends: core
+    skills: [ui-build-verify, a11y-audit, visual-regression]
+    agents: [ui-verifier]
+  devops:
+    description: Core + CI fixes, containers/deploy, releases and incident triage.
+    extends: core
+    skills: [ci-fix, containerize-deploy, release-notes, incident-triage, dependency-audit]
+    agents: [devops, security-auditor]

@@ -1,0 +1,57 @@
+id: release
+version: 1
+title: Release preparation
+description: In parallel make CI green, audit dependencies and draft release notes; gate on all three, ask for human approval, then create the tag and draft release.
+inputs:
+  version:
+    type: string
+    required: true
+    description: Target version (e.g. 1.4.0) — use "auto" to derive it from commits
+  since:
+    type: string
+    default: ""
+    description: Previous release tag (default - latest tag)
+defaults:
+  retries: 1
+  timeout_min: 45
+  max_parallel: 3
+nodes:
+  - id: ci-green
+    title: CI green
+    agent: devops
+    skill: ci-fix
+    prompt: |
+      Make sure the default branch's CI checks pass locally (lint, typecheck, tests, build). Fix root causes
+      of any failures. Report `rejected` if anything stays red.
+
+  - id: deps
+    title: Dependency audit
+    agent: security-auditor
+    skill: dependency-audit
+    prompt: Audit dependencies before release {{ inputs.version }}. Report `rejected` for unaddressed critical/high CVEs.
+
+  - id: notes
+    title: Release notes
+    agent: devops
+    skill: release-notes
+    prompt: |
+      Prepare release notes and the CHANGELOG section for version {{ inputs.version }}
+      {% if inputs.since %}(changes since {{ inputs.since }}){% endif %}. If the version is "auto", propose one.
+      Update version files. Do not tag or publish.
+
+  - id: gate
+    type: gate
+    depends_on: [ci-green, deps, notes]
+
+  - id: approve
+    type: human
+    depends_on: [gate]
+    prompt: "Release {{ inputs.version }} is ready (CI green, deps audited, notes drafted). Create the tag and draft release?"
+
+  - id: tag
+    title: Tag and draft release
+    agent: devops
+    depends_on: [approve]
+    prompt: |
+      Commit the version/changelog changes, create an annotated tag for {{ inputs.version }} and draft the
+      release text. Push only the release commit and tag to the remote; do not publish packages or deploy.

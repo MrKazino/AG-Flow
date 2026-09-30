@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>agflow dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%234f46e5'/><path d='M8 22 L16 8 L24 22' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='16' cy='20' r='2.5' fill='white'/></svg>">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Main navigation">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="28" height="28"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 22 L16 8 L24 22" stroke="var(--bg)" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="20" r="2.5" fill="var(--bg)"/></svg>
+        </span>
+        <div>
+          <div class="brand-name">agflow</div>
+          <div class="brand-sub">Workflows Manager</div>
+        </div>
+      </div>
+      <nav id="nav">
+        <a href="#/overview" data-page="overview">Overview</a>
+        <a href="#/doctor" data-page="doctor">Doctor</a>
+        <div class="nav-group">Components</div>
+        <a href="#/skills" data-page="skills">Skills</a>
+        <a href="#/agents" data-page="agents">Agents</a>
+        <a href="#/rules" data-page="rules">Rules &amp; GEMINI.md</a>
+        <a href="#/mcp" data-page="mcp">MCP servers</a>
+        <a href="#/hooks" data-page="hooks">Hooks</a>
+        <a href="#/plugins" data-page="plugins">Plugins</a>
+        <a href="#/profiles" data-page="profiles">Profiles</a>
+        <div class="nav-group">Orchestration</div>
+        <a href="#/graphs" data-page="graphs">Graphs</a>
+        <a href="#/runs" data-page="runs">Runs</a>
+      </nav>
+      <div class="sidebar-foot">
+        <button id="theme" class="ghost small" type="button" aria-label="Toggle colour theme">Theme</button>
+        <span id="version" class="muted"></span>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <h1 id="title">Overview</h1>
+        <code id="workspace" class="ws" title="Workspace"></code>
+      </header>
+      <section id="view" aria-live="polite"></section>
+    </main>
+  </div>
+  <div id="drawer" class="drawer" hidden>
+    <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+      <div class="drawer-head">
+        <h2 id="drawer-title"></h2>
+        <button class="ghost" id="drawer-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <div id="drawer-body" class="drawer-body"></div>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/static/graph.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

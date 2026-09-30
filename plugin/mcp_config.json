@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agflow": {
+      "command": "agflow",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
