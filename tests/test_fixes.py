@@ -326,3 +326,27 @@ def test_workflow_fix_never_overwrites_an_earlier_bak_and_still_undoes(home, wor
     assert earlier.read_text() == "an earlier backup\n" and (wf.parent / "ship.md.bak2").is_file()
     fixes.undo_last()
     assert wf.is_file() and not (wf.parent / "ship.md.bak2").exists() and earlier.read_text() == "an earlier backup\n"
+
+
+def test_legacy_migration_fix_is_fully_undoable_workspace_and_global(home, workspace):
+    """F10 (not reproduced): every path `fix` migrates from the 1.x layout is backed up, so `--undo` restores the
+    whole tree byte for byte. Locks the invariant the audit was worried about."""
+    for rel, text in ((".agent/rules/a.md", "Alpha rule.\n"),
+                      (".agent/skills/s1/SKILL.md", "---\nname: s1\ndescription: " + "d" * 50 + "\n---\nbody\n"),
+                      (".agent/workflows/w.md", "---\ndescription: legacy workflow\n---\n1. step\n")):
+        write(workspace / rel, text)
+    legacy = home / ".gemini" / "antigravity"
+    write(legacy / "skills" / "gs" / "SKILL.md", "---\nname: gs\ndescription: " + "d" * 50 + "\n---\nbody\n")
+    write(legacy / "global_workflows" / "gw.md", "---\ndescription: legacy global workflow\n---\n1. x\n")
+    write(legacy / "mcp_config.json", json.dumps({"mcpServers": {"legacy": {"command": "echo"}}}))
+    before_ws, before_home = snapshot(workspace), snapshot(home)
+
+    plan = fixes.build_plan(workspace)
+    legacy_fixes = [f for f in plan.fixes if f.code == "legacy.config"]
+    assert len(legacy_fixes) == 2  # one for the workspace tree, one for the global tree
+    result = fixes.apply(workspace, {f.id: None for f in legacy_fixes})
+    assert len(result.applied) == 2 and not result.failed
+    assert snapshot(workspace) != before_ws and snapshot(home) != before_home  # it really migrated something
+
+    fixes.undo_last()
+    assert snapshot(workspace) == before_ws and snapshot(home) == before_home

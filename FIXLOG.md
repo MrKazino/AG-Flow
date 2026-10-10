@@ -134,8 +134,8 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 
 ### F10 — legacy migration backup coverage
 - **Status:** **n/a — not reproduced** · **Location (verified):** `fixes.py:608–618` · **Doctor rule:** n/a
-- **Evidence:** legacy workspace (`rules`,`skills`,`workflows`) + legacy global (`skills`,`global_workflows`,`mcp_config.json`) → `fix` applied 2 fixes and changed the tree; `fix --undo` restored it **byte-identical** (`docs/audit/phase0_verify_output.txt`, F10). `_fix_legacy` touches exactly the paths `migrate_legacy_workspace/global` mutate; the audit's "missing" paths are never written by those functions.
-- **Action:** no production change; one characterization test planned to lock the invariant.
+- **Evidence:** legacy workspace (`rules`,`skills`,`workflows`) + legacy global (`skills`,`global_workflows`,`mcp_config.json`) → `fix` applied 2 fixes and changed the tree; `fix --undo` restored it **byte-identical** (`docs/audit/phase0_verify_output.txt`, F10). `_fix_legacy` touches exactly the paths `migrate_legacy_workspace/global` mutate; the audit's "missing" paths (`rules_dir`, `workflows_dirs`, `mcp_file` of the other scope) are never written by those functions.
+- **Action:** no production change. `test_legacy_migration_fix_is_fully_undoable_workspace_and_global` locks the invariant the finding was worried about (it passes on `bf8c178`, as expected for a not-reproduced finding). Out of scope, logged as N3: `agflow migrate` / `POST /api/migrate` move and rename without a transaction by design.
 
 ### F11 — graph inputs unredacted in ledger
 - **Status:** pending · **Location (verified):** `graph/store.py:52` (+ report.md/report.json sinks) · **Doctor rule:** none (artifact content)
