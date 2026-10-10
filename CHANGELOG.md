@@ -13,6 +13,14 @@ _(entries are added with each fix)_
 _(entries are added with each fix)_
 
 ### Fixed
+- **Hook latency no longer grows with the number of runs (F3).** The PostToolUse and Stop hooks (and the
+  dashboard overview) used to read and validate every run's `state.json` to find the active ones. They now use a
+  small self-healing index, `.agents/agflow/runs/.index.json`, so the cost depends on how many runs are *running*,
+  not on how many exist (500 finished runs: 308 ms → 4.5 ms on the measurement machine). The index is a cache;
+  `state.json` stays authoritative, and a damaged index is set aside as `.index.json.corrupt` and rebuilt. Older
+  agflow versions ignore the new file. `agflow doctor` now reports runs whose `state.json` is unreadable
+  (`runs.corrupt`) and a rebuilt index (`runs.index.corrupt`) instead of skipping them silently. The README's
+  "about 70 ms per hook" claim is replaced by measured, run-count-independent numbers.
 - **Discovery survives corrupt files (F5).** One bad entry in the disabled-items index (invalid JSON, unknown kind,
   missing key, non-UTF-8 bytes) or an unreadable/corrupt plugin manifest, `mcp_config.json`, `hooks.json` or
   `GEMINI.md` no longer crashes `doctor`, the dashboard or the hooks. Each problem is reported by `agflow doctor`

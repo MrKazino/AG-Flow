@@ -338,6 +338,8 @@ def validate_inventory(inv: Inventory) -> list[Issue]:
                                 f"{group}: {chars} chars of always-on rules; prefer model_decision/glob triggers"))
 
     issues += _shadowing(inv)
+    if inv.workspace is not None:
+        issues += _run_store_issues(inv.workspace)
     for lay in inv.layouts:
         if lay.scope.value == "legacy":
             leftovers = legacy_config(lay)
@@ -452,6 +454,26 @@ def _shadowing(inv: Inventory) -> list[Issue]:
             elif len(items) > 1:
                 issues.append(_err(f"{kind.value}.duplicate",
                                    f"{kind.value} '{name}' defined {len(items)}x in {scopes[0]}", items[0].path))
+    return issues
+
+
+def _run_store_issues(workspace: Path) -> list[Issue]:
+    """Runs that listings and hooks skip, and a run index that had to be rebuilt -- both are otherwise silent."""
+    from agflow.graph.store import INDEX_FILE, RunStore
+
+    store = RunStore(workspace)
+    if not store.root.is_dir():
+        return []
+    health = store.health()
+    issues = [_warn("runs.corrupt",
+                    f"run '{run_id}': its state.json is unreadable or invalid, so run listings and hooks skip it; "
+                    "restore the file or delete the run folder",
+                    store.run_dir(run_id) / "state.json") for run_id in health["corrupt_runs"]]
+    if health["index_damaged"]:
+        aside = store.root / (INDEX_FILE + ".corrupt")
+        issues.append(_warn("runs.index.corrupt",
+                            "the run index was damaged; agflow rebuilt it from the runs on disk. The damaged copy "
+                            "is kept for inspection; delete it once you have looked at it", aside))
     return issues
 
 

@@ -276,7 +276,7 @@ Each node runs as a fresh `google.antigravity.Agent`, configured from the node's
 | PostToolUse | Appends a compact entry to the ledger of each active run. |
 | Stop | Returns `continue` while an active run has claimable nodes and is progressing (capped). |
 
-Hooks take a fast path (about 70 ms each). Tune them per workspace in `.agents/agflow/guard.yaml` (`deny:`, `ask:` and `allow:` regex lists), turn the guard off with `AGFLOW_GUARD=off`, or install without hooks using `agflow install --no-hooks`. Set `AGFLOW_HOOK_DEBUG=1` to log raw payloads to `~/.gemini/config/agflow/hook-debug.jsonl`.
+Hooks take a fast path that skips the CLI start-up, and their cost does not depend on how many runs a workspace holds: the active runs are found through a small self-healing index (`.agents/agflow/runs/.index.json`) instead of by reading every run. Measured with `scripts/bench.py` (1 running run among 1, 50 and 500 finished ones), the PostToolUse handler takes about 3–5 ms on Windows 11 and 0.3–1 ms on Linux (WSL2) at every size. What each hook call still pays is process start-up and imports, a constant of roughly 0.2 s on Linux and 0.6 s on Windows on the development machine used for those numbers; yours will differ. Tune them per workspace in `.agents/agflow/guard.yaml` (`deny:`, `ask:` and `allow:` regex lists), turn the guard off with `AGFLOW_GUARD=off`, or install without hooks using `agflow install --no-hooks`. Set `AGFLOW_HOOK_DEBUG=1` to log raw payloads to `~/.gemini/config/agflow/hook-debug.jsonl`.
 
 ## Where Antigravity looks for things
 
@@ -324,6 +324,7 @@ uv run pytest                                   # engine, MCP (in-process + stdi
 uv run ruff check src tests
 uv run agflow doctor --path plugin --strict     # the bundled plugin must stay clean
 uv run agflow graph validate plugin/graphs/*.yaml
+uv run python scripts/bench.py                  # hook latency vs. number of runs, doctor runtime on a big plugin
 ```
 
 Layout: `plugin/` holds the Antigravity plugin, shipped inside the wheel as `agflow/_plugin`. `src/agflow/` holds the manager, the engine, the MCP server, the runner and the dashboard. `prompts/` has the copy-paste prompts, and `tests/` the test suite.

@@ -1,8 +1,16 @@
-"""Run persistence: <workspace>/.agents/agflow/runs/<run_id>/{state.json, ledger.jsonl, report.*}."""
+"""Run persistence: <workspace>/.agents/agflow/runs/<run_id>/{state.json, ledger.jsonl, report.*}.
+
+``<runs>/.index.json`` is a small status index (is a run ``running``? when was it created?) so the hot paths --
+the PostToolUse hook runs on *every* agent tool call -- do not have to read and validate every ``state.json``.
+It is a cache, never the source of truth: ``state.json`` always wins, readers reconcile the index against the
+directory listing (indexing runs they have not seen, dropping ones that vanished), the runs they act on are
+re-validated from their own state file, and a damaged index is set aside as ``.index.json.corrupt`` and rebuilt.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -18,6 +26,13 @@ from agflow.graph.engine import RunState
 from agflow.graph.schema import Graph
 
 RUN_INDEX_MAX = 500
+INDEX_FILE = ".index.json"
+INDEX_VERSION = 1
+
+
+def _entry(state: RunState) -> dict[str, Any]:
+    return {"graph_id": state.graph_id, "status": state.status, "created_at": state.created_at,
+            "updated_at": state.updated_at}
 
 
 class RunNotFound(KeyError):
@@ -66,7 +81,99 @@ class RunStore:
         return RunState.model_validate(read_json(f))
 
     def _write(self, state: RunState) -> None:
+        # the durable state first: if the index update then fails, readers reconcile it (state.json always wins)
         write_json(self._state_file(state.run_id), state.model_dump(mode="json"))
+        self._update_index({state.run_id: _entry(state)}, ())
+
+    # -- status index -------------------------------------------------------------------------
+    def _index_path(self) -> Path:
+        return self.root / INDEX_FILE
+
+    def _index_lock(self) -> FileLock:
+        self.root.mkdir(parents=True, exist_ok=True)
+        return FileLock(str(self.root / ".index.lock"), timeout=30)
+
+    def _read_index(self) -> dict[str, dict[str, Any]]:
+        """The cached entries. A damaged index is moved aside (evidence for `doctor`) and treated as empty."""
+        f = self._index_path()
+        try:
+            data = read_json(f, None)
+        except (OSError, ValueError):
+            data = False  # unreadable or not JSON
+        if data is None:
+            return {}
+        runs = data.get("runs") if isinstance(data, dict) else None
+        if not isinstance(runs, dict) or not all(isinstance(e, dict) for e in runs.values()):
+            os.replace(f, f.with_name(INDEX_FILE + ".corrupt"))
+            return {}
+        return runs if data.get("version") == INDEX_VERSION else {}
+
+    def _update_index(self, upserts: dict[str, dict[str, Any]], removals: Any,
+                      discovered: dict[str, dict[str, Any]] | None = None) -> None:
+        """Apply changes under the index lock. ``upserts`` overwrite; ``discovered`` (what a reader found on disk)
+        only fills gaps, so a reader can never replace the fresher entry a concurrent writer just stored."""
+        with self._index_lock():
+            entries = self._read_index()  # re-read under the lock so concurrent writers never lose each other
+            for run_id in removals:
+                entries.pop(run_id, None)
+            for run_id, found in (discovered or {}).items():
+                entries.setdefault(run_id, found)
+            entries.update(upserts)
+            write_json(self._index_path(), {"version": INDEX_VERSION, "runs": entries})
+
+    def _listed_run_ids(self) -> set[str]:
+        """Run directories by name only (no per-run file access): this is what keeps the lookup flat."""
+        with os.scandir(self.root) as it:
+            return {e.name for e in it if not e.name.startswith(".") and e.is_dir()}
+
+    def _entry_from_disk(self, run_id: str) -> dict[str, Any] | None:
+        """Index entry for one run, parsed from its state file. ``None``: no state file yet."""
+        f = self._state_file(run_id)
+        try:
+            st = f.stat()
+        except FileNotFoundError:
+            return None
+        try:
+            return _entry(RunState.model_validate(read_json(f)))
+        except (OSError, ValueError):  # unreadable, not JSON, or not a valid state: listings skip it, doctor says so
+            return {"corrupt": True, "sig": [st.st_mtime_ns, st.st_size]}
+
+    def _reconcile(self) -> dict[str, dict[str, Any]]:
+        """Index entries for exactly the run directories that exist, parsing only what is new or changed."""
+        if not self.root.is_dir():
+            return {}
+        entries = self._read_index()
+        listed = self._listed_run_ids()
+        discovered: dict[str, dict[str, Any]] = {}
+        rechecked: dict[str, dict[str, Any]] = {}
+        removals = [run_id for run_id in entries if run_id not in listed]
+        for run_id in sorted(listed - entries.keys()):
+            found = self._entry_from_disk(run_id)
+            if found is not None:
+                discovered[run_id] = found
+        for run_id, known in entries.items():
+            if known.get("corrupt") and run_id in listed:  # re-check a corrupt run only if its file changed
+                try:
+                    st = self._state_file(run_id).stat()
+                except FileNotFoundError:
+                    continue
+                if known.get("sig") != [st.st_mtime_ns, st.st_size]:
+                    found = self._entry_from_disk(run_id)
+                    if found is not None:
+                        rechecked[run_id] = found
+        if discovered or rechecked or removals:
+            self._update_index(rechecked, removals, discovered)
+            for run_id in removals:
+                entries.pop(run_id)
+            entries.update(discovered)
+            entries.update(rechecked)
+        return entries
+
+    def health(self) -> dict[str, Any]:
+        """What `doctor` reports: runs whose state cannot be read, and whether the index had to be rebuilt."""
+        entries = self._reconcile()
+        return {"corrupt_runs": sorted(r for r, e in entries.items() if e.get("corrupt")),
+                "index_damaged": self._index_path().with_name(INDEX_FILE + ".corrupt").exists()}
 
     @contextmanager
     def transaction(self, run_id: str) -> Iterator[RunState]:
@@ -106,21 +213,62 @@ class RunStore:
         return jpath, mpath
 
     # -- queries -----------------------------------------------------------------------------
-    def list(self) -> list[RunState]:
+    def list(self, limit: int | None = None) -> list[RunState]:
+        """Runs, newest first. Unreadable runs are skipped (``health()`` reports them).
+
+        Without ``limit`` every run is read and validated. With ``limit`` the index picks the newest candidates
+        and only those are parsed, so a page of 50 costs 50 reads however many runs the workspace holds."""
         if not self.root.is_dir():
             return []
-        runs = []
-        for d in self.root.iterdir():
-            f = d / "state.json"
-            if f.is_file():
-                try:
-                    runs.append(RunState.model_validate(read_json(f)))
-                except Exception:
-                    continue
-        return sorted(runs, key=lambda r: r.created_at, reverse=True)
+        if limit is None:
+            runs = []
+            for d in self.root.iterdir():
+                f = d / "state.json"
+                if f.is_file():
+                    try:
+                        runs.append(RunState.model_validate(read_json(f)))
+                    except (OSError, ValueError):
+                        continue
+            return sorted(runs, key=lambda r: r.created_at, reverse=True)
+        entries = self._reconcile()
+        newest_first = sorted((r for r, e in entries.items() if not e.get("corrupt")),
+                              key=lambda r: entries[r].get("created_at", 0.0), reverse=True)
+        page: list[RunState] = []
+        for run_id in newest_first:
+            if len(page) >= limit:
+                break
+            try:
+                page.append(self.load(run_id))
+            except (OSError, ValueError, RunNotFound):
+                continue  # went bad or vanished since it was indexed
+        return sorted(page, key=lambda r: r.created_at, reverse=True)
 
     def active(self) -> list[RunState]:
-        return [r for r in self.list() if r.status == "running"]
+        """Runs whose status is ``running``. Cost depends on how many are running, not on how many exist."""
+        entries = self._reconcile()
+        running: list[RunState] = []
+        corrections: dict[str, dict[str, Any]] = {}
+        removals: list[str] = []
+        for run_id, known in entries.items():
+            if known.get("corrupt") or known.get("status") != "running":
+                continue
+            try:
+                state = self.load(run_id)  # the state file is the truth, whatever the index says
+            except RunNotFound:
+                removals.append(run_id)
+                continue
+            except (OSError, ValueError):
+                found = self._entry_from_disk(run_id)
+                if found is not None:
+                    corrections[run_id] = found
+                continue
+            if state.status == "running":
+                running.append(state)
+            else:
+                corrections[run_id] = _entry(state)  # finished since it was indexed (e.g. a crash between writes)
+        if corrections or removals:
+            self._update_index(corrections, removals)
+        return sorted(running, key=lambda r: r.created_at, reverse=True)
 
 
 def render_report_md(graph: Graph, state: RunState) -> str:

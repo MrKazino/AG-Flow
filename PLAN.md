@@ -723,3 +723,14 @@ Logged for the final report; **not** fixed unless they block a registry fix (§1
 * **N4.** `ID_RE` permits `-` in node/input ids, but Jinja reads `{{ inputs.bug-id }}` as subtraction; ids with hyphens can only be reached via `inputs['bug-id']`. (Interacts with D1.)
 * **N5.** The README's "about 70 ms per hook" cannot be reproduced on this machine even at one run (≈550 ms wall, interpreter start-up bound). F3 replaces it with a measured, run-count-independent statement; the absolute number is hardware-dependent and will be labelled as such.
 * **N6.** `google.antigravity` may have no wheels for some platforms (the installer already handles this); on this Windows machine the SDK *is* installed, which differs from the prompt's assumption.
+
+---
+
+## 12. Plan deviations log
+
+Deviations from the cards above are recorded here as they happen, with the reason. Cards are left as originally written so the history stays reviewable.
+
+* **D-1 (F3, doctor rules).** The card planned `runs.index.stale`. Because every reader self-heals a stale or incomplete index (and re-validates the runs it acts on), staleness is never user-visible, so a rule for it would only ever fire spuriously. The rules actually shipped are `runs.corrupt` (a run whose `state.json` listings and hooks silently skip) and `runs.index.corrupt` (the index was damaged and rebuilt; evidence kept in `.index.json.corrupt`). Both close a real R10 gap.
+* **D-2 (F3, benchmark workload).** The first benchmark left every run in `running` (worst case for any active-run index: all of them genuinely need checking) and so did not show the improvement. `scripts/bench.py` now models the realistic shape (`--running 1` among N finished runs). The old code was benchmarked against the identical workload for the before/after figures.
+* **D-3 (tooling).** WSL has no outbound network, so POSIX parity runs use an offline venv built from Linux wheels downloaded on Windows from `uv export` pins. The harness lives outside the repository (scratch tooling, not a deliverable); results are quoted in FIXLOG with the platform they ran on.
+* **D-4 (observations).** Two more observations added to §11: **N7** hook start-up is dominated by constant imports (`pydantic`, `urllib.request` pulled in by `hooks.py` for `file://` handling, `filelock`→`asyncio`); **N8** a run abandoned without finishing stays `running` forever, so every hook ledgers into it and active-run lookups cannot be cheaper than the number of such runs.
