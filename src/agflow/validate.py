@@ -11,6 +11,7 @@ from typing import Any
 from agflow import frontmatter, paths
 from agflow.inventory import Inventory
 from agflow.models import Issue, Item, Kind, Level
+from agflow.redact import SECRET_KEY_RE  # one definition of 'secret-looking'; also used for run artifacts
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SKILL_NAME_MAX = 64
@@ -31,7 +32,6 @@ KNOWN_AGENT_TOOLS = {
     "read_url_content", "search_web", "generate_image", "invoke_subagent", "define_subagent",
     "ask_question", "notify_user", "task_boundary", "list_resources", "read_resource",
 }
-SECRET_KEY_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)", re.IGNORECASE)
 _LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
 _CODE_PATH_RE = re.compile(r"`((?:scripts|references|assets)/[^`\s]+)`")
 

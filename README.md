@@ -123,7 +123,7 @@ Undo everything with `agflow uninstall` (your own `GEMINI.md` content is preserv
 
 ## How orchestration works
 
-A graph is a DAG of **agent**, **gate** and **human** nodes. One pure state machine (`agflow.graph.engine`) drives it, and it is shared by both runners. Runs persist in `<workspace>/.agents/agflow/runs/<run_id>/` (`state.json`, `ledger.jsonl`, `report.md`), so they survive restarts and can be switched between runners.
+A graph is a DAG of **agent**, **gate** and **human** nodes. One pure state machine (`agflow.graph.engine`) drives it, and it is shared by both runners. Runs persist in `<workspace>/.agents/agflow/runs/<run_id>/` (`state.json`, `ledger.jsonl`, `report.md`), so they survive restarts and can be switched between runners. **Secrets:** inputs whose name looks like a credential (`api_key`, `*_TOKEN`, `password`, …) and well-known token shapes (`sk-…`, `ghp_…`, `AIza…`, `Bearer …`) are replaced by `***REDACTED***` in `ledger.jsonl`, `report.md` and `report.json`. `state.json` keeps the real values because the engine renders them into subagent prompts (`{{ inputs.api_key }}`); treat `.agents/agflow/runs/` as sensitive and keep it out of version control.
 
 ```mermaid
 flowchart LR

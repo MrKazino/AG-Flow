@@ -24,6 +24,7 @@ from agflow.fsutil import atomic_write_text, read_json, write_json
 from agflow.graph import engine
 from agflow.graph.engine import RunState
 from agflow.graph.schema import Graph
+from agflow.redact import redact_mapping
 
 RUN_INDEX_MAX = 500
 INDEX_FILE = ".index.json"
@@ -64,7 +65,7 @@ class RunStore:
         state = engine.new_run(graph, inputs, str(self.workspace), now=now, graph_path=graph_path)
         with self._lock(state.run_id):
             self._write(state)
-        self.ledger(state.run_id, {"event": "run_started", "graph": graph.id, "inputs": inputs})
+        self.ledger(state.run_id, {"event": "run_started", "graph": graph.id, "inputs": redact_mapping(inputs)})
         register_run(state.run_id, self.workspace)
         return state
 
@@ -206,6 +207,7 @@ class RunStore:
     def write_report(self, state: RunState) -> tuple[Path, Path]:
         graph = state.graph_model()
         view = engine.status_view(graph, state, verbose=True)
+        view["inputs"] = redact_mapping(view["inputs"])  # reports are shared; state.json keeps the real values
         d = self.run_dir(state.run_id)
         jpath, mpath = d / "report.json", d / "report.md"
         write_json(jpath, view)
@@ -279,7 +281,7 @@ def render_report_md(graph: Graph, state: RunState) -> str:
              f"- Started: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state.created_at))}",
              f"- Updated: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state.updated_at))}"]
     if state.inputs:
-        lines += ["", "## Inputs", ""] + [f"- **{k}**: {v}" for k, v in state.inputs.items()]
+        lines += ["", "## Inputs", ""] + [f"- **{k}**: {v}" for k, v in redact_mapping(state.inputs).items()]
     if state.loops:
         lines += ["", "## Rework loops", ""] + [f"- {g}: {n}" for g, n in state.loops.items()]
     lines += ["", "## Nodes", "", "| Node | Agent | Status | Attempts | Summary |", "|---|---|---|---|---|"]

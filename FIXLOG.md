@@ -138,9 +138,13 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Action:** no production change. `test_legacy_migration_fix_is_fully_undoable_workspace_and_global` locks the invariant the finding was worried about (it passes on `bf8c178`, as expected for a not-reproduced finding). Out of scope, logged as N3: `agflow migrate` / `POST /api/migrate` move and rename without a transaction by design.
 
 ### F11 — graph inputs unredacted in ledger
-- **Status:** pending · **Location (verified):** `graph/store.py:52` (+ report.md/report.json sinks) · **Doctor rule:** none (artifact content)
-- **Phase-0 evidence:** `"inputs": {"api_key": "sk-live-SECRET123"}` in `ledger.jsonl`.
-- **Change / files / tests / evidence:** pending.
+- **Status:** fixed · **Location (verified):** `graph/store.py:52` (+ the same sink class: `render_report_md` inputs section and `report.json` via `status_view`) · **Doctor rule:** none (artifact content; guarded by `tests/test_redact.py`)
+- **Phase-0 evidence:** `"inputs": {"api_key": "sk-live-SECRET123"}` verbatim in `ledger.jsonl`.
+- **Root cause:** the run-artifact writers serialised `inputs` as given; there was no shared notion of "secret-looking" outside the doctor's MCP check.
+- **Change:** new stdlib-only `agflow/redact.py`: `REDACTED`, `SECRET_KEY_RE` (moved from `validate.py`, which imports it — one definition; `AUTH` now skips author/authority but still matches Authorization, so doctor's MCP secret check no longer flags `AUTHOR`-style names), `redact_text()` (well-known token shapes: `sk-`, `gh[pousr]_`, `github_pat_`, `AIza`, `xox*-`, `AKIA…`, `Bearer …`, PEM private-key headers) and `redact_mapping()` (deep, non-mutating, idempotent; a secret-looking *key* hides its whole value, empty/None/False/0 are left alone). Applied to the `run_started` ledger event, the Inputs section of `report.md` and `report.json`. **`state.json` keeps the real values on purpose** — the engine renders `{{ inputs.* }}` into subagent prompts from it (tested); documented in the README.
+- **Files:** `src/agflow/redact.py` (new), `src/agflow/graph/store.py`, `src/agflow/validate.py`, `README.md`, `CHANGELOG.md`, `tests/test_redact.py` (new).
+- **Tests added (33; all fail on `bf8c178` — the module does not exist, and the run-folder tests fail by content):** 10 secret-looking keys; 7 ordinary keys stay; nesting + no mutation; structured value hidden by a secret key; 8 token shapes under an innocent key; empty/non-string untouched; idempotent; `validate` re-exports the shared pattern; the ledger never holds the secret; reports never hold it while `state.json` and the rendered prompt still do; the secret appears in no file of the run folder except `state.json`.
+- **Limit:** only inputs and shapes listed above are recognised; a free-text secret in an agent's summary under an unremarkable key is not detected.
 
 ### F12 — force-kill matches by loose CommandLine
 - **Status:** pending · **Location (verified):** `scripts/easy_install.py:151–164,219–229` · **Doctor rule:** none (installer script)

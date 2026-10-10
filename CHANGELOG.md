@@ -27,6 +27,12 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
   token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.
 
 ### Fixed
+- **Graph inputs that look like credentials are no longer written to run logs and reports (F11).** A secret
+  passed as a graph input (for example `-i api_key=…`) was stored in plain text in `ledger.jsonl`, `report.md`
+  and `report.json`. Inputs whose name looks like a credential, and well-known token shapes (`sk-…`, `ghp_…`,
+  `AIza…`, `Bearer …`, private-key headers), are now replaced by `***REDACTED***` in those files. `state.json`
+  keeps the real value because the engine needs it to render subagent prompts. The doctor's MCP secret check no
+  longer flags names such as `AUTHOR`.
 - **`agflow doctor` no longer crashes on a file that disappears or cannot be read (F9).** The GEMINI.md, MCP
   config, hooks and plugin-manifest validators (and the always-on rule size count) read files without a guard, so
   a file deleted between discovery and validation, or one that was not valid UTF-8, aborted the whole doctor run.
