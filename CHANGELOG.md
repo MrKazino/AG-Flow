@@ -14,6 +14,14 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
   one run, valid only for that run's `/stream`) and opens the stream with `?ticket=`. Reconnects ask for a new
   ticket. The `#token=` start-up flow is unchanged.
 
+- **The uv bootstrap in `easy-installer.bat` is pinned and checksum-verified (F4).** When uv was missing, the
+  installer ran `irm https://astral.sh/uv/install.ps1 | iex` (Windows) or `curl … | sh` / `wget … | sh`
+  (POSIX): whatever the CDN served at that moment executed on your machine, unseen — no version, no checksum.
+  It now downloads one specific uv release's installer to a temporary file, verifies its SHA-256 against
+  `scripts/uv-pin.env`, and only then runs it; a mismatch aborts and runs nothing. New helper scripts:
+  `scripts/install-uv.sh`, `scripts/install-uv.ps1`. For CI or a one-off newer uv, set `AGFLOW_UV_VERSION` together
+  with `AGFLOW_UV_INSTALLER_SHA256`.
+
 ### Changed
 - **`?token=` is no longer accepted on `/api/*` (F1; migration).** Scripts that called the dashboard API with the
   token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.

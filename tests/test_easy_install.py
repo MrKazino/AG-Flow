@@ -202,3 +202,145 @@ def test_run_stream_echoes_and_returns_output(capsys):
     code, out = easy.run_stream([_sys.executable, "-c", script])
     assert code == 0 and "to-stdout" in out and "to-stderr" in out
     assert "to-stdout" in capsys.readouterr().out
+
+
+# --- F4: the uv bootstrap is pinned and checksum-verified, never piped into a shell ----------------------------------
+
+import hashlib  # noqa: E402
+import os  # noqa: E402
+
+SCRIPTS = REPO / "scripts"
+PIN = SCRIPTS / "uv-pin.env"
+INSTALL_UV_SH = SCRIPTS / "install-uv.sh"
+INSTALL_UV_PS1 = SCRIPTS / "install-uv.ps1"
+PIPE_TO_SHELL = re.compile(r"\|\s*(sudo\s+)?(ba|z|da)?sh\b|\|\s*(iex|invoke-expression)\b", re.IGNORECASE)
+
+
+def read_pin() -> dict[str, str]:
+    return dict(line.split("=", 1) for line in PIN.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith("#"))
+
+
+def code_lines(path):
+    """Lines that are not comments."""
+    return [ln for ln in path.read_text(encoding="utf-8").splitlines()
+            if not ln.lstrip().startswith(("#", "rem ", "REM ", "::"))]
+
+
+def test_no_pipe_to_shell_anywhere_in_the_installer():
+    for f in (BAT, INSTALL_UV_SH, INSTALL_UV_PS1):
+        offenders = [ln for ln in code_lines(f) if PIPE_TO_SHELL.search(ln)]
+        assert not offenders, f"{f.name} pipes a download into a shell: {offenders}"
+
+
+def test_batch_half_runs_the_verified_script_not_the_cdn():
+    batch = "\n".join(code_lines(BAT))
+    assert "install-uv.ps1" in batch and "install-uv.sh" in batch
+    assert "astral.sh/uv/install" not in batch
+
+
+def test_pin_file_is_wellformed():
+    pin = read_pin()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", pin["UV_VERSION"])
+    assert re.fullmatch(r"[0-9a-f]{64}", pin["UV_SH_SHA256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", pin["UV_PS1_SHA256"])
+    assert pin["UV_SH_SHA256"] != pin["UV_PS1_SHA256"]
+    assert b"\r" not in PIN.read_bytes(), "the pin file is parsed by sh: it must stay LF-only"
+    assert "scripts/uv-pin.env text eol=lf" in (REPO / ".gitattributes").read_text()
+
+
+def run_installer_script(cmd, tmp_path, *, installer_text, url_hash="match", extra_env=None):
+    """Run an install-uv script against a local fake installer served over file://."""
+    fake = tmp_path / "fake-installer"
+    fake.write_text(installer_text, encoding="utf-8", newline="\n")
+    digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+    env = {**os.environ, "AGFLOW_UV_INSTALLER_URL": fake.as_uri(), "HOME": str(tmp_path), "USERPROFILE": str(tmp_path),
+           "MARKER": str(tmp_path / "ran.marker")}
+    for k in ("AGFLOW_UV_VERSION", "AGFLOW_UV_INSTALLER_SHA256"):
+        env.pop(k, None)
+    if url_hash == "match":
+        env["AGFLOW_UV_VERSION"], env["AGFLOW_UV_INSTALLER_SHA256"] = "9.9.9", digest
+    elif url_hash == "mismatch":
+        env["AGFLOW_UV_VERSION"], env["AGFLOW_UV_INSTALLER_SHA256"] = "9.9.9", "0" * 64
+    env.update(extra_env or {})
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
+    return proc, tmp_path / "ran.marker"
+
+
+needs_sh_and_curl = pytest.mark.skipif(not (shutil.which("sh") and shutil.which("curl")), reason="needs sh and curl")
+FAKE_SH = '#!/bin/sh\necho ran > "$MARKER"\n'
+
+
+@needs_sh_and_curl
+def test_sh_bootstrap_runs_the_installer_only_after_the_checksum_matches(tmp_path):
+    proc, marker = run_installer_script(["sh", str(INSTALL_UV_SH)], tmp_path, installer_text=FAKE_SH)
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+@needs_sh_and_curl
+def test_sh_bootstrap_refuses_a_tampered_installer(tmp_path):
+    proc, marker = run_installer_script(["sh", str(INSTALL_UV_SH)], tmp_path, installer_text=FAKE_SH,
+                                        url_hash="mismatch")
+    assert proc.returncode != 0
+    assert "does not match" in proc.stderr and "0" * 64 in proc.stderr
+    assert not marker.exists(), "an installer that fails verification must never run"
+
+
+@needs_sh_and_curl
+def test_sh_bootstrap_uses_the_pinned_checksum_by_default(tmp_path):
+    proc, marker = run_installer_script(["sh", str(INSTALL_UV_SH)], tmp_path, installer_text=FAKE_SH, url_hash="pin")
+    assert proc.returncode != 0 and not marker.exists()  # the fake installer cannot match the pinned digest
+    assert read_pin()["UV_SH_SHA256"] in proc.stderr and read_pin()["UV_VERSION"] in proc.stderr
+
+
+@needs_sh_and_curl
+def test_sh_bootstrap_version_override_requires_a_checksum(tmp_path):
+    proc, marker = run_installer_script(["sh", str(INSTALL_UV_SH)], tmp_path, installer_text=FAKE_SH,
+                                        url_hash="pin", extra_env={"AGFLOW_UV_VERSION": "9.9.9"})
+    assert proc.returncode != 0 and not marker.exists()
+    assert "AGFLOW_UV_INSTALLER_SHA256" in proc.stderr
+
+
+@needs_sh_and_curl
+def test_sh_bootstrap_reports_an_unreachable_download(tmp_path):
+    proc, marker = run_installer_script(["sh", str(INSTALL_UV_SH)], tmp_path, installer_text=FAKE_SH,
+                                        extra_env={"AGFLOW_UV_INSTALLER_URL": (tmp_path / "missing").as_uri()})
+    assert proc.returncode != 0 and not marker.exists() and "could not download" in proc.stderr
+
+
+needs_powershell = pytest.mark.skipif(os.name != "nt" or not shutil.which("powershell"),
+                                      reason="Windows PowerShell only")
+FAKE_PS1 = 'Set-Content -Path $env:MARKER -Value ran\n'
+
+
+def ps(tmp_path, **kw):
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_UV_PS1)]
+    return run_installer_script(cmd, tmp_path, installer_text=FAKE_PS1, **kw)
+
+
+@needs_powershell
+def test_powershell_bootstrap_runs_the_installer_only_after_the_checksum_matches(tmp_path):
+    proc, marker = ps(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists()
+
+
+@needs_powershell
+def test_powershell_bootstrap_refuses_a_tampered_installer(tmp_path):
+    proc, marker = ps(tmp_path, url_hash="mismatch")
+    assert proc.returncode != 0 and not marker.exists()
+    assert "does not match" in proc.stderr
+
+
+@needs_powershell
+def test_powershell_bootstrap_uses_the_pinned_checksum_by_default(tmp_path):
+    proc, marker = ps(tmp_path, url_hash="pin")
+    assert proc.returncode != 0 and not marker.exists()
+    assert read_pin()["UV_PS1_SHA256"] in proc.stderr
+
+
+@needs_powershell
+def test_powershell_bootstrap_version_override_requires_a_checksum(tmp_path):
+    proc, marker = ps(tmp_path, url_hash="pin", extra_env={"AGFLOW_UV_VERSION": "9.9.9"})
+    assert proc.returncode != 0 and not marker.exists() and "AGFLOW_UV_INSTALLER_SHA256" in proc.stderr

@@ -55,6 +55,13 @@ half only makes sure `uv` exists (it asks before downloading it from astral.sh) 
 [`scripts/easy_install.py`](scripts/easy_install.py), which does the identical steps on every OS.
 Open a new terminal afterwards so `agflow` is on your PATH.
 
+**How uv is bootstrapped.** If `uv` is missing, the installer does *not* pipe a download into a shell. It
+fetches the installer of one specific uv release (the version and the SHA-256 of its installer scripts are pinned in
+[`scripts/uv-pin.env`](scripts/uv-pin.env)) to a temporary file, verifies the checksum, and only then runs it; a
+mismatch aborts with the expected and actual digests and runs nothing. To use another uv release (for example in
+CI), set `AGFLOW_UV_VERSION` together with `AGFLOW_UV_INSTALLER_SHA256` (the SHA-256 of that release's
+`uv-installer.sh` / `uv-installer.ps1`); a version override without a checksum is refused.
+
 **Updating:** delete (or rename) the old project folder, extract the new zip to a fresh location, and run
 the `easy-installer.bat` that sits directly next to `pyproject.toml`. Line `[1/7]` of the output shows the
 version being installed (`ok agflow 0.2.0 …`); the installer stops if it finds a newer copy nested inside
