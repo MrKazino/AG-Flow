@@ -133,9 +133,12 @@ def apply_profile(workspace: Path, selection: dict[str, list[str]]) -> list[str]
 
         mcp_file = paths.workspace_layout(workspace).mcp_file
         assert mcp_file is not None
-        for name, cfg in mcp_registry.list_servers(mcp_file).items():
-            want = name in selection["mcp"] or name == "agflow"
-            if bool(cfg.get("disabled")) == want:
-                mcp_registry.set_enabled(mcp_file, name, want)
-                actions.append(f"{'enable ' if want else 'disable'} mcp {name}")
+        try:
+            for name, cfg in mcp_registry.list_servers(mcp_file).items():
+                want = name in selection["mcp"] or name == "agflow"
+                if bool(cfg.get("disabled")) == want:
+                    mcp_registry.set_enabled(mcp_file, name, want)
+                    actions.append(f"{'enable ' if want else 'disable'} mcp {name}")
+        except mcp_registry.McpError as exc:  # callers (CLI, dashboard) already handle ToggleError
+            raise ToggleError(str(exc)) from exc
     return actions

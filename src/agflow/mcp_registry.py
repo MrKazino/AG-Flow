@@ -43,10 +43,23 @@ def config_file(scope: str, workspace: Path | None) -> Path:
 
 
 def _load(f: Path) -> dict[str, Any]:
-    data = read_json(f, {}) or {}
-    if not isinstance(data, dict):
+    """Read ``f`` and check its shape, so a hand-edited file produces a readable error naming it instead of a
+    ``TypeError``/``AttributeError`` from deep inside an operation (callers turn ``McpError`` into messages/400s)."""
+    try:
+        data = read_json(f, {})
+    except (OSError, ValueError) as exc:  # unreadable, not UTF-8, or not JSON
+        raise McpError(f"{f} could not be read as JSON: {exc}") from exc
+    if data is None:  # a literal `null`
+        data = {}
+    if not isinstance(data, dict):  # checked before any truthiness shortcut: `[] or {}` must not pass as valid
         raise McpError(f"{f} is not a JSON object")
-    data.setdefault("mcpServers", {})
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise McpError(f"'mcpServers' in {f} must be an object of server entries, got {type(servers).__name__}")
+    bad = sorted(name for name, cfg in servers.items() if not isinstance(cfg, dict))
+    if bad:
+        raise McpError(f"{f}: server entr{'y' if len(bad) == 1 else 'ies'} {', '.join(map(repr, bad))} must be "
+                       "an object (command/args/env or serverUrl)")
     return data
 
 

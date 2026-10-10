@@ -174,8 +174,12 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Evidence:** Windows 287 passed / 7 skipped; WSL (POSIX) 290 passed / 4 skipped; `ruff` clean.
 
 ### F16 — `mcpServers` type validation
-- **Status:** pending · **Location (verified):** `mcp_registry.py:45–50,96–104` · **Doctor rule:** none (CLI/API error path)
-- **Change / files / tests / evidence:** pending.
+- **Status:** fixed · **Location (verified):** `mcp_registry.py:45–50,96–104` · **Doctor rule:** none (CLI/API error path; doctor already validates the file's shape via `mcp.schema`/`mcp.server`)
+- **Phase-0 evidence:** `mcpServers: []` + `add` → `TypeError`; a scalar entry + `set_enabled` → `TypeError`; invalid JSON → `JSONDecodeError` — none were `McpError`.
+- **Root cause:** `_load` checked only that the top level was an object.
+- **Change:** `_load` now rejects, with `McpError` naming the file: unreadable / non-UTF-8 / invalid JSON, a non-object top level, a non-object `mcpServers`, and any non-object server entry (listing which). A refused operation never touches the file. `toggles.apply_profile` translates `McpError` into `ToggleError`, which the CLI and the dashboard already handle (previously a broken config surfaced as a raw error or HTTP 500).
+- **Files:** `src/agflow/mcp_registry.py`, `src/agflow/toggles.py`, `CHANGELOG.md`, `tests/test_manage.py`.
+- **Tests added (30; 24 fail on `bf8c178`):** 7 malformed shapes × {list, add, remove, toggle} each raise `McpError` naming the file and leave the file byte-identical; dashboard add/toggle/remove answer 400; applying a profile over a broken config raises `ToggleError`.
 
 ### F17 — `graph_status`/`graph_runs` full parse
 - **Status:** pending · **Location (verified):** `mcp_server.py:166,180` · **Doctor rule:** none

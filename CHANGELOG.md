@@ -27,6 +27,10 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
   token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.
 
 ### Fixed
+- **A malformed `mcp_config.json` gives a readable error instead of a crash (F16).** If `mcpServers` was a list or
+  a string, or a server entry was not an object, `agflow mcp add/remove/enable/disable`, the dashboard's MCP page
+  and `agflow profile apply` failed with an internal `TypeError`/`AttributeError`. They now stop with a message
+  that names the file and what is wrong, and leave the file untouched.
 - **Graph inputs that look like credentials are no longer written to run logs and reports (F11).** A secret
   passed as a graph input (for example `-i api_key=…`) was stored in plain text in `ledger.jsonl`, `report.md`
   and `report.json`. Inputs whose name looks like a credential, and well-known token shapes (`sk-…`, `ghp_…`,

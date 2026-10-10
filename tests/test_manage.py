@@ -322,3 +322,53 @@ def test_dry_run_announces_the_name_the_real_run_will_use(workspace):
     assert any("kept as ship.md.bak2" in a for a in dry.actions)
     real = migrate_all(workspace, include_global=False)
     assert any("kept as ship.md.bak2" in a for a in real.actions)
+
+
+# --- F16: a malformed mcp_config.json is a readable McpError, never TypeError/AttributeError -------------------------
+
+
+MALFORMED_MCP = [
+    pytest.param(b'{"mcpServers": ["a"]}', id="servers-is-a-list"),
+    pytest.param(b'{"mcpServers": "abc"}', id="servers-is-a-string"),
+    pytest.param(b'{"mcpServers": {"x": "oops"}}', id="entry-is-a-scalar"),
+    pytest.param(b'{"mcpServers": {"x": {"command": "echo"}, "y": null}}', id="one-bad-entry-among-good-ones"),
+    pytest.param(b"[]", id="top-level-list"),
+    pytest.param(b"{oops", id="invalid-json"),
+    pytest.param(b"\xff\xfe\x00\x80", id="not-utf8"),
+]
+MCP_OPERATIONS = {
+    "list": lambda f: mcp_registry.list_servers(f),
+    "add": lambda f: mcp_registry.add_server(f, "github"),
+    "remove": lambda f: mcp_registry.remove_server(f, "x"),
+    "toggle": lambda f: mcp_registry.set_enabled(f, "x", False),
+}
+
+
+@pytest.mark.parametrize("op", sorted(MCP_OPERATIONS))
+@pytest.mark.parametrize("body", MALFORMED_MCP)
+def test_malformed_mcp_config_raises_a_readable_mcp_error(tmp_path, body, op):
+    f = tmp_path / "mcp_config.json"
+    f.write_bytes(body)
+    with pytest.raises(mcp_registry.McpError) as exc:
+        MCP_OPERATIONS[op](f)
+    assert str(f) in str(exc.value), "the message must name the file"
+    assert f.read_bytes() == body, "a refused operation must not touch the file"
+
+
+def test_dashboard_mcp_endpoints_answer_400_for_a_malformed_config(workspace):
+    from fastapi.testclient import TestClient
+
+    from agflow.dashboard.app import create_app
+
+    f = paths.workspace_layout(workspace).mcp_file
+    write(f, '{"mcpServers": ["a"]}')
+    c = TestClient(create_app(workspace, "t"), headers={"X-Agflow-Token": "t"})
+    assert c.post("/api/mcp", json={"name": "github", "scope": "workspace"}).status_code == 400
+    assert c.post("/api/mcp/workspace/x/toggle", json={"enabled": False}).status_code == 400
+    assert c.delete("/api/mcp/workspace/x").status_code == 400
+
+
+def test_applying_a_profile_reports_a_broken_mcp_config_as_a_toggle_error(workspace):
+    write(paths.workspace_layout(workspace).mcp_file, '{"mcpServers": "abc"}')
+    with pytest.raises(toggles.ToggleError, match="mcp_config.json"):
+        toggles.apply_profile(workspace, {"skills": [], "agents": [], "mcp": ["github"]})
