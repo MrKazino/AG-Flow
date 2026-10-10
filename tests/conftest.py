@@ -11,6 +11,32 @@ REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugin"
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _sandbox_guard(tmp_path_factory: pytest.TempPathFactory):
+    """Fail loudly if any code resolves the user's home outside pytest's temp tree.
+
+    The per-test ``home`` fixture isolates $HOME with ``monkeypatch``; a test that calls ``monkeypatch.undo()``
+    would silently restore the real one and the next ``install()`` would rewrite the developer's actual
+    ~/.gemini. This guard is installed once per session with its own MonkeyPatch, so a test cannot undo it.
+    """
+    base = tmp_path_factory.getbasetemp().resolve()
+    real_home = paths.home
+
+    def guarded_home() -> Path:
+        h = real_home()
+        try:
+            h.resolve().relative_to(base)
+        except ValueError:
+            raise RuntimeError(f"test escaped its sandbox: HOME resolves to {h}, outside {base}. Never call "
+                               "monkeypatch.undo() in a test; use `with monkeypatch.context() as mp:`") from None
+        return h
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(paths, "home", guarded_home)
+    yield
+    mp.undo()
+
+
 @pytest.fixture(autouse=True)
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Every test gets an isolated $HOME so nothing touches the real ~/.gemini."""

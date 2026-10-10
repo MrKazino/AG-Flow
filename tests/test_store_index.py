@@ -122,10 +122,10 @@ def test_crash_between_state_write_and_index_write_loses_nothing(store: RunStore
     def crash(*a, **k):
         raise OSError("simulated crash after the state file was written")
 
-    monkeypatch.setattr(store, "_update_index", crash)
-    with pytest.raises(OSError, match="simulated crash"):
-        store._write(state)
-    monkeypatch.undo()
+    with monkeypatch.context() as mp:  # scoped: never monkeypatch.undo() (it would also undo the HOME sandbox)
+        mp.setattr(store, "_update_index", crash)
+        with pytest.raises(OSError, match="simulated crash"):
+            store._write(state)
     assert ids(store.active()) == [state.run_id]  # the durable state wins; the index heals
 
 
@@ -147,15 +147,16 @@ def test_post_tool_use_cost_is_independent_of_total_runs(workspace: Path, monkey
     make_run(store, "running", 0)
     payload = {"cwd": str(workspace), "tool_name": "run_command", "tool_input": {"CommandLine": "ls"}}
     hooks.post_tool_use(payload)  # warm
-    calls = count_validations(monkeypatch)
-    hooks.post_tool_use(payload)
-    few = calls[0]
-    monkeypatch.undo()
+    with monkeypatch.context() as mp:
+        calls = count_validations(mp)
+        hooks.post_tool_use(payload)
+        few = calls[0]
     for n in range(1, 120):
         make_run(store, "succeeded", n)
     hooks.post_tool_use(payload)  # index the new ones once
-    calls = count_validations(monkeypatch)
-    hooks.post_tool_use(payload)
+    with monkeypatch.context() as mp:
+        calls = count_validations(mp)
+        hooks.post_tool_use(payload)
     assert calls[0] == few == 1
 
 

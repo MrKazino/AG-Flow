@@ -56,6 +56,12 @@ def backups_dir() -> Path:
     return global_config_dir() / ".agflow-backups"
 
 
+def install_tmp_dir(state_dir: Path) -> Path:
+    """Staging area for an in-progress plugin swap. Under agflow's state dir, so no directory Antigravity scans
+    (a half-built or superseded plugin there would be loaded as a second copy)."""
+    return state_dir / "install-tmp"
+
+
 def workspace_root_dir(workspace: Path) -> Path:
     return workspace / ".agents"
 

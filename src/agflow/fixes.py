@@ -670,6 +670,10 @@ def _manual(issue: Issue, extra: list[str] | None = None) -> Manual:
     elif code == "plugin.installed_twice":
         steps.append("Remove all but one copy of the plugin: delete (or uninstall through the tool that installed "
                      "it) the copy in the location you don't need.")
+    elif code == "install.interrupted":
+        steps.append("Run `agflow install` to finish the interrupted install (it first puts a plugin that was moved "
+                     "aside back), or `agflow uninstall` to roll it back. Don't delete the leftover folder by hand: "
+                     "it may hold your previous plugin.")
     elif code == "graph.invalid":
         steps.append(f"Edit the graph YAML ({path}) — {issue.message}. Check it with `agflow graph validate`.")
     if extra:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -141,16 +142,29 @@ def install(scope: Scope, workspace: Path | None = None, *, source: Path | None 
     src = (source or paths.bundled_plugin_dir()).resolve()
     if not (src / "plugin.json").is_file():
         raise InstallError(f"{src} is not a plugin (missing plugin.json)")
+    if link and profile:  # refuse before anything is touched
+        raise InstallError("--link cannot be combined with --profile (a link installs everything)")
     target = _plugin_target(scope, workspace)
     manifest_file = _manifest_path(scope, workspace)
     plan = Plan(scope=scope, target=target, manifest=manifest_file)
+    plan.actions += recover_interrupted(scope, workspace, dry_run=dry_run)
     manifest: dict[str, Any] = read_json(manifest_file, None) or {
         "scope": scope, "created": [], "modified": {}, "managed_blocks": []}
     backup_root = paths.backups_dir() / timestamp()
     anchor = paths.home()
+    if not dry_run:
+        manifest["source"], manifest["profile"], manifest["command"] = str(src), profile, agflow_command()
+
+    def persist() -> None:
+        if not dry_run:
+            write_json(manifest_file, manifest)
 
     def record_write(path: Path) -> None:
-        """Back up ``path`` the first time we touch it; remember whether we created it."""
+        """Back up ``path`` the first time we touch it, remember whether we created it, and put that on disk.
+
+        Order matters for crash safety: back up -> record -> (the caller) act. The manifest is the only record of
+        where a backup lives, so it must be durable *before* the thing it describes is changed or removed.
+        """
         key = str(path)
         if key in manifest["created"] or key in manifest["modified"]:
             return
@@ -161,25 +175,18 @@ def install(scope: Scope, workspace: Path | None = None, *, source: Path | None 
             plan.actions.append(f"backup   {path}")
         else:
             manifest["created"].append(key)
+        persist()
 
     selection = resolve_profile(profile, src, workspace) if profile else None
 
-    # 1. plugin bundle
+    # 1. plugin bundle: build the new one beside the old one, then swap them with two renames
     record_write(target)
     plan.actions.append(f"{'link' if link else 'install'}  {src} -> {target}")
     if not dry_run:
-        if target.exists() or target.is_symlink():
-            remove(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if link:
-            if selection:
-                raise InstallError("--link cannot be combined with --profile (a link installs everything)")
-            target.symlink_to(src, target_is_directory=True)
-        else:
-            copy_tree(src, target)
-            (target / "GEMINI.md").unlink(missing_ok=True)  # installed separately below
-            _filter_to_profile(target, selection, plan)
-            _wire_commands(target, with_hooks, plan)
+        stale_copy = _replace_plugin(src, target, manifest_file.parent, link=link, selection=selection,
+                                     with_hooks=with_hooks, plan=plan)
+        if stale_copy:
+            plan.warnings.append(stale_copy)
     elif selection:
         plan.actions.append(f"profile  {profile}: {len(selection['skills'])} skills, "
                             f"{len(selection['agents'])} agents")
@@ -197,13 +204,93 @@ def install(scope: Scope, workspace: Path | None = None, *, source: Path | None 
             if not dry_run:
                 atomic_write_text(rule, _master_rule(master))
 
-    if not dry_run:
-        manifest["source"] = str(src)
-        manifest["profile"] = profile
-        manifest["command"] = agflow_command()
-        write_json(manifest_file, manifest)
+    persist()
     plan.actions.append(f"manifest {manifest_file}")
     return plan
+
+
+def _replace_plugin(src: Path, target: Path, state_dir: Path, *, link: bool, selection: dict[str, list[str]] | None,
+                    with_hooks: bool, plan: Plan) -> str | None:
+    """Install the plugin bundle at ``target`` so that, at every instant, either the old or the new one is whole.
+
+    The new bundle is built in agflow's install-tmp folder first (a failure there leaves the live plugin
+    untouched); then the live one is renamed aside and the new one renamed into place -- renames, not
+    copy-and-delete. A crash between the two renames leaves the old plugin intact in install-tmp, and the next
+    install/uninstall (or ``recover_interrupted``) puts it back. Returns a warning when the superseded copy
+    could not be deleted afterwards (the install itself succeeded).
+    """
+    tmp_root = paths.install_tmp_dir(state_dir)
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(4)
+    stage, old = tmp_root / f"{token}-new", tmp_root / f"{token}-old"
+    try:
+        if link:
+            stage.symlink_to(src, target_is_directory=True)
+        else:
+            copy_tree(src, stage)
+            (stage / "GEMINI.md").unlink(missing_ok=True)  # installed separately
+            _filter_to_profile(stage, selection, plan)
+            _wire_commands(stage, with_hooks, plan)
+    except BaseException:
+        remove(stage)
+        raise
+    target.parent.mkdir(parents=True, exist_ok=True)
+    had_previous = target.exists() or target.is_symlink()
+    if had_previous:
+        try:
+            os.replace(target, old)
+        except OSError as exc:
+            remove(stage)
+            raise InstallError(
+                f"could not replace {target}: {exc}. Files in it are probably in use - close Google Antigravity "
+                "(and any running agflow process) and run the install again. The existing plugin was left "
+                "untouched.") from exc
+    try:
+        os.replace(stage, target)
+    except OSError:
+        if had_previous:
+            os.replace(old, target)  # put the previous plugin back
+        remove(stage)
+        raise
+    if had_previous:
+        try:
+            remove(old)
+        except OSError as exc:
+            return (f"the previous plugin copy at {old} could not be deleted ({exc}); it is harmless and the next "
+                    "`agflow install` or `agflow uninstall` removes it")
+    return None
+
+
+def recover_interrupted(scope: Scope, workspace: Path | None = None, *, dry_run: bool = False) -> list[str]:
+    """Finish or undo what a crashed install left in install-tmp. Returns what was (or would be) done.
+
+    * a ``*-old`` folder with no live plugin: the crash fell between the two renames -> put the old plugin back;
+    * a ``*-old`` folder next to a live plugin: the swap completed, only the cleanup was missed -> delete it;
+    * a ``*-new`` folder: an unfinished build -> delete it.
+    """
+    tmp_root = paths.install_tmp_dir(_manifest_path(scope, workspace).parent)
+    if not tmp_root.is_dir():
+        return []
+    target = _plugin_target(scope, workspace)
+    actions: list[str] = []
+    entries = sorted(tmp_root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)  # newest first
+    for entry in entries:
+        if not entry.name.endswith("-old"):
+            actions.append(f"remove   unfinished copy {entry}")
+            if not dry_run:
+                remove(entry)
+        elif not (target.exists() or target.is_symlink()):
+            actions.append(f"restored {target} from {entry} (an install was interrupted)")
+            if not dry_run:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(entry, target)
+        else:
+            actions.append(f"remove   superseded copy {entry}")
+            if not dry_run:
+                remove(entry)
+    if not dry_run and not any(tmp_root.iterdir()):
+        tmp_root.rmdir()
+    return actions
 
 
 def _master_rule(master: str) -> str:
@@ -232,9 +319,9 @@ def _install_global_gemini_md(master: str, manifest: dict[str, Any], plan: Plan,
         if existing != _BLOCK_RE.sub("", existing) and not dry_run:
             atomic_write_text(gpath, user_part + "\n" if user_part else "")
         return
-    record_write(gpath)
-    if str(gpath) not in manifest["managed_blocks"]:
+    if str(gpath) not in manifest["managed_blocks"]:  # before record_write: it persists the manifest
         manifest["managed_blocks"].append(str(gpath))
+    record_write(gpath)
     plan.actions.append(f"merge    {gpath} (managed block, {len(combined)} chars)")
     if not dry_run:
         atomic_write_text(gpath, combined)
@@ -325,6 +412,7 @@ def uninstall(scope: Scope, workspace: Path | None = None, *, dry_run: bool = Fa
     if not manifest:
         raise InstallError(f"no agflow install found for scope {scope} ({manifest_file})")
     plan = Plan(scope=scope, target=_plugin_target(scope, workspace), manifest=manifest_file)
+    plan.actions += recover_interrupted(scope, workspace, dry_run=dry_run)  # an interrupted install first
     for p in manifest.get("managed_blocks", []):
         path = Path(p)
         plan.actions.append(f"unmerge  {path}")

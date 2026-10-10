@@ -13,6 +13,14 @@ _(entries are added with each fix)_
 _(entries are added with each fix)_
 
 ### Fixed
+- **`agflow install` is crash-safe (F6).** Previously the existing plugin directory was deleted before the new one
+  was copied in, and the manifest — the only record of where the backup lives — was written last, so a crash or
+  power loss in between left a half-installed plugin and an unreferenced backup. Now each backup is recorded in
+  the manifest before the thing it describes is changed, and the new plugin is built in
+  `…/agflow/install-tmp` and swapped in with two renames. `agflow install` and `agflow uninstall` first finish or
+  roll back an interrupted install, and `agflow doctor` reports one as `install.interrupted`. `--link` with
+  `--profile` is now refused *before* anything is touched (it used to delete the existing plugin first). The
+  manifest format is unchanged.
 - **A concurrent report no longer destroys a headless run (F2).** If the MCP orchestrator reported a node that
   `agflow graph run` was also working on (or the run was aborted from the dashboard meanwhile), the engine's
   "node is not running" rejection used to escape the runner, which then cancelled every in-flight node. The

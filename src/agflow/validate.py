@@ -338,6 +338,7 @@ def validate_inventory(inv: Inventory) -> list[Issue]:
                                 f"{group}: {chars} chars of always-on rules; prefer model_decision/glob triggers"))
 
     issues += _shadowing(inv)
+    issues += _interrupted_installs(inv)
     if inv.workspace is not None:
         issues += _run_store_issues(inv.workspace)
     for lay in inv.layouts:
@@ -454,6 +455,23 @@ def _shadowing(inv: Inventory) -> list[Issue]:
             elif len(items) > 1:
                 issues.append(_err(f"{kind.value}.duplicate",
                                    f"{kind.value} '{name}' defined {len(items)}x in {scopes[0]}", items[0].path))
+    return issues
+
+
+def _interrupted_installs(inv: Inventory) -> list[Issue]:
+    """Leftovers of a crashed install/upgrade. Until they are recovered, the previous plugin may be out of place."""
+    state_dirs = [paths.workspace_state_dir(inv.workspace)] if inv.workspace is not None else []
+    if any(lay.scope == paths.Scope.GLOBAL for lay in inv.layouts):
+        state_dirs.append(paths.global_state_dir())
+    issues = []
+    for state_dir in state_dirs:
+        tmp_root = paths.install_tmp_dir(state_dir)
+        leftovers = sorted(p.name for p in tmp_root.iterdir()) if tmp_root.is_dir() else []
+        if leftovers:
+            issues.append(_warn("install.interrupted",
+                                f"an agflow install or upgrade was interrupted ({len(leftovers)} leftover item(s) in "
+                                f"{tmp_root}). Run `agflow install` to finish it or `agflow uninstall` to roll it "
+                                "back; either first puts your previous plugin back if it was moved aside", tmp_root))
     return issues
 
 
