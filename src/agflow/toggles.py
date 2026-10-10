@@ -55,13 +55,27 @@ def disable(inv: Inventory, kind: Kind, name: str) -> Path:
     parked = state_dir / "disabled" / f"{kind.value}s" / item.scope.replace(":", "_") / src.name
     if parked.exists():
         raise ToggleError(f"{parked} already exists; remove it or enable the parked copy first")
-    parked.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(parked))
+    entry = {"kind": kind.value, "name": name, "scope": item.scope,
+             "original_path": str(src), "parked_path": str(parked)}
     f, index = _index(state_dir)
-    index.append({"kind": kind.value, "name": name, "scope": item.scope,
-                  "original_path": str(src), "parked_path": str(parked)})
+    # Journal first, then move: a crash between the two leaves an entry whose parked copy does not exist yet while
+    # the item is still in place -- harmless, healed by the next toggle. The other order orphaned the parked item
+    # (moved, but unknown to the index): invisible to the inventory and impossible to re-enable.
+    index = [e for e in index if not _same_item(e, entry)]  # leftovers of an earlier interrupted disable
+    index.append(entry)
     write_json(f, index)
+    parked.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(src), str(parked))
+    except Exception:
+        # nothing moved: take the entry back out. (A hard stop skips this and leaves the harmless stale entry.)
+        write_json(f, [e for e in index if e is not entry])
+        raise
     return parked
+
+
+def _same_item(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    return (a.get("kind"), a.get("name"), a.get("original_path")) == (b["kind"], b["name"], b["original_path"])
 
 
 def enable(inv: Inventory, kind: Kind, name: str) -> Path:
@@ -70,6 +84,11 @@ def enable(inv: Inventory, kind: Kind, name: str) -> Path:
         for entry in index:
             if entry["kind"] == kind.value and entry["name"] == name:
                 original, parked = Path(entry["original_path"]), Path(entry["parked_path"])
+                if original.exists() and not parked.exists():
+                    # the entry of a disable that was interrupted before it moved anything: the item never left
+                    index.remove(entry)
+                    write_json(f, index)
+                    return original
                 if original.exists():
                     raise ToggleError(f"{original} exists again; refusing to overwrite it")
                 if not parked.exists():

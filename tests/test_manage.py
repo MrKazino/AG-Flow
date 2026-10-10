@@ -184,3 +184,108 @@ def test_discover_survives_non_utf8_plugin_files(workspace, name):
     (plugin / name).write_bytes(b"\xff\xfe\x00\x80 not utf-8")
     inv = Inventory.discover(workspace, include_global=False, include_legacy=False)
     assert any(path == plugin / name for path, _ in inv.load_errors)
+
+
+# --- F7: disabling is journalled before it moves anything ----------------------------------------
+
+
+class Crash(BaseException):
+    """A hard stop: nothing after it runs (as with a power loss)."""
+
+
+SKILL_BODY = "---\nname: mine\ndescription: " + "d" * 50 + "\n---\nbody\n"
+
+
+def _skill(workspace):
+    return write(workspace / ".agents" / "skills" / "mine" / "SKILL.md", SKILL_BODY)
+
+
+def _index_of(workspace):
+    f = paths.workspace_state_dir(workspace) / "disabled" / "index.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.is_file() else []
+
+
+def test_crash_after_the_journal_but_before_the_move_leaves_the_item_enabled(workspace, monkeypatch):
+    skill = _skill(workspace)
+    inv = Inventory.discover(workspace)
+
+    def hard_crash(*a, **k):
+        raise Crash
+
+    with monkeypatch.context() as mp:
+        mp.setattr(toggles.shutil, "move", hard_crash)
+        with pytest.raises(Crash):
+            toggles.disable(inv, Kind.SKILL, "mine")
+    assert skill.read_text() == SKILL_BODY  # never moved
+    after = Inventory.discover(workspace)
+    assert after.find(Kind.SKILL, "mine") is not None and after.find(Kind.SKILL, "mine", enabled=False) is None
+    assert len(_index_of(workspace)) == 1, "the leftover journal entry is harmless and is cleaned up by the next toggle"
+    toggles.disable(after, Kind.SKILL, "mine")  # retrying must not duplicate the entry
+    assert len(_index_of(workspace)) == 1 and not skill.exists()
+
+
+def test_a_failing_journal_write_moves_nothing(workspace, monkeypatch):
+    skill = _skill(workspace)
+    inv = Inventory.discover(workspace)
+
+    def hard_crash(*a, **k):
+        raise Crash
+
+    with monkeypatch.context() as mp:
+        mp.setattr(toggles, "write_json", hard_crash)
+        with pytest.raises(Crash):
+            toggles.disable(inv, Kind.SKILL, "mine")
+    assert skill.read_text() == SKILL_BODY
+    assert not (paths.workspace_state_dir(workspace) / "disabled" / "skills").exists()
+
+
+def test_a_failed_move_rolls_the_journal_entry_back(workspace, monkeypatch):
+    skill = _skill(workspace)
+    inv = Inventory.discover(workspace)
+
+    def locked(*a, **k):
+        raise OSError("file in use")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(toggles.shutil, "move", locked)
+        with pytest.raises(OSError, match="file in use"):
+            toggles.disable(inv, Kind.SKILL, "mine")
+    assert skill.read_text() == SKILL_BODY and _index_of(workspace) == []
+
+
+def test_enable_heals_a_stale_entry_whose_move_never_happened(workspace):
+    skill = _skill(workspace)
+    state = paths.workspace_state_dir(workspace)
+    (state / "disabled").mkdir(parents=True)
+    (state / "disabled" / "index.json").write_text(json.dumps([{
+        "kind": "skill", "name": "mine", "scope": "workspace", "original_path": str(skill.parent),
+        "parked_path": str(state / "disabled" / "skills" / "workspace" / "mine")}]), encoding="utf-8")
+    assert toggles.enable(Inventory.discover(workspace), Kind.SKILL, "mine") == skill.parent  # already in place
+    assert _index_of(workspace) == [] and skill.read_text() == SKILL_BODY
+
+
+def test_enable_still_refuses_to_overwrite_when_both_copies_exist(workspace):
+    skill = _skill(workspace)
+    inv = Inventory.discover(workspace)
+    toggles.disable(inv, Kind.SKILL, "mine")
+    _skill(workspace)  # the user recreated it meanwhile
+    with pytest.raises(toggles.ToggleError, match="exists again"):
+        toggles.enable(Inventory.discover(workspace), Kind.SKILL, "mine")
+    assert skill.exists()
+
+
+def test_doctor_reports_stale_and_lost_disabled_entries(workspace):
+    from agflow.validate import validate_inventory
+
+    skill = _skill(workspace)
+    state = paths.workspace_state_dir(workspace) / "disabled"
+    state.mkdir(parents=True)
+    (state / "index.json").write_text(json.dumps([
+        {"kind": "skill", "name": "mine", "scope": "workspace", "original_path": str(skill.parent),
+         "parked_path": str(state / "skills" / "workspace" / "mine")},
+        {"kind": "skill", "name": "gone", "scope": "workspace", "original_path": str(workspace / "nowhere"),
+         "parked_path": str(state / "skills" / "workspace" / "gone")}]), encoding="utf-8")
+    issues = {i.code: i for i in validate_inventory(Inventory.discover(workspace, include_global=False,
+                                                                       include_legacy=False))}
+    assert issues["disabled.stale"].level.value == "info" and "mine" in issues["disabled.stale"].message
+    assert issues["disabled.lost"].level.value == "warning" and "gone" in issues["disabled.lost"].message

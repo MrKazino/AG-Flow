@@ -27,6 +27,11 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
   token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.
 
 ### Fixed
+- **Disabling a skill/agent/rule can no longer orphan it (F7).** `disable` moved the item first and recorded it in
+  the index second, so a crash in between left it parked but invisible and impossible to re-enable. It now records
+  first and moves second; a leftover entry from an interrupted disable is harmless and is healed by the next
+  `enable`/`disable`. `agflow doctor` reports such entries (`disabled.stale`, INFO) and parked items whose files are
+  gone (`disabled.lost`, WARNING).
 - **`agflow install` is crash-safe (F6).** Previously the existing plugin directory was deleted before the new one
   was copied in, and the manifest — the only record of where the backup lives — was written last, so a crash or
   power loss in between left a half-installed plugin and an unreferenced backup. Now each backup is recorded in

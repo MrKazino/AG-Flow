@@ -66,6 +66,8 @@ class Inventory:
     layouts: list[Layout] = field(default_factory=list)
     sources: list[tuple[Path, str]] = field(default_factory=list)  # (layout root, scope label)
     load_errors: list[tuple[Path, str]] = field(default_factory=list)
+    # disabled-index entries whose parked copy is gone: (index file, entry, original still in place?)
+    stale_disabled: list[tuple[Path, dict[str, Any], bool]] = field(default_factory=list)
 
     # -- queries -------------------------------------------------------------------------
     def of(self, kind: Kind, *, enabled: bool | None = True) -> list[Item]:
@@ -230,6 +232,8 @@ class Inventory:
             if parked.exists():
                 self._add(kind, name, parked, entry.get("scope", "?"), enabled=False,
                           meta={"original_path": original})
+            else:
+                self.stale_disabled.append((index_file, entry, Path(str(original)).exists()))
 
 
 def _state_dirs(workspace: Path | None, include_global: bool) -> list[Path]:

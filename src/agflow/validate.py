@@ -338,6 +338,7 @@ def validate_inventory(inv: Inventory) -> list[Issue]:
                                 f"{group}: {chars} chars of always-on rules; prefer model_decision/glob triggers"))
 
     issues += _shadowing(inv)
+    issues += _stale_disabled(inv)
     issues += _interrupted_installs(inv)
     if inv.workspace is not None:
         issues += _run_store_issues(inv.workspace)
@@ -455,6 +456,24 @@ def _shadowing(inv: Inventory) -> list[Issue]:
             elif len(items) > 1:
                 issues.append(_err(f"{kind.value}.duplicate",
                                    f"{kind.value} '{name}' defined {len(items)}x in {scopes[0]}", items[0].path))
+    return issues
+
+
+def _stale_disabled(inv: Inventory) -> list[Issue]:
+    """Disabled-items index entries with no parked copy: a harmless leftover, or a parked item that was deleted."""
+    issues = []
+    for index_file, entry, original_in_place in inv.stale_disabled:
+        what = f"{entry.get('kind')} '{entry.get('name')}'"
+        if original_in_place:
+            issues.append(_info("disabled.stale",
+                                f"{what} has an entry in the disabled-items index but was never moved (a disable was "
+                                "interrupted); it is still in place and enabled. The entry is removed the next time "
+                                "you enable or disable it", index_file))
+        else:
+            issues.append(_warn("disabled.lost",
+                                f"{what} is listed as disabled but neither its parked copy nor its original location "
+                                "exists any more; remove the entry from the index file if you deleted it on purpose",
+                                index_file))
     return issues
 
 

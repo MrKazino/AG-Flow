@@ -105,9 +105,14 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Prevented from recurring:** (1) all `monkeypatch.undo()` calls in the test-suite replaced by scoped `monkeypatch.context()`; (2) a **session-scoped sandbox guard** in `tests/conftest.py` wraps `paths.home()` and raises `RuntimeError("test escaped its sandbox …")` if HOME ever resolves outside pytest's temp tree — verified with a deliberately escaping test that it fails loudly instead of touching the real home. The guard is installed with its own `MonkeyPatch`, so a test cannot undo it.
 
 ### F7 — non-atomic disable
-- **Status:** pending · **Location (verified):** `toggles.py:59–63` · **Doctor rule:** planned `disabled.stale`
-- **Phase-0 evidence:** crash between move and index write → item parked, invisible.
-- **Change / files / tests / evidence:** pending.
+- **Status:** fixed · **Location (verified):** `toggles.py:59–63` · **Doctor rules:** `disabled.stale` (INFO: entry whose parked copy is gone but the item is still in place), `disabled.lost` (WARNING: neither the parked copy nor the original exists)
+- **Phase-0 evidence:** crash between move and index write → item parked, invisible to the inventory, impossible to re-enable.
+- **Root cause:** the move (first durable effect) preceded the index write, so a crash orphaned the parked item.
+- **Change:** `disable()` is journal-first: the index entry is written (atomic, F14) *before* the move; a failed move (`Exception`) takes the entry back out; a hard stop between the two leaves an entry whose parked copy does not exist while the item is still in place — harmless. `enable()` heals exactly that case (drops the stale entry and returns the original path); `disable()` removes stale duplicates of the same item before appending; "both copies exist" still refuses to overwrite. `Inventory` now records index entries with no parked copy (`stale_disabled`) so doctor can report them instead of skipping silently.
+- **Files:** `src/agflow/toggles.py`, `src/agflow/inventory.py`, `src/agflow/validate.py`, `CHANGELOG.md`, `tests/test_manage.py`.
+- **Tests added (6; 4 fail on `bf8c178`):** crash after the journal / before the move keeps the item enabled and a retry does not duplicate the entry; a failing journal write moves nothing; a failed move rolls the entry back; `enable` heals a stale entry; `enable` still refuses when both copies exist; doctor reports stale and lost entries.
+- **Evidence:** Windows 276 passed / 6 skipped; WSL 278 passed / 4 skipped; `ruff` clean.
+- **Note:** a crash model detail — the rollback is `except Exception` (not `BaseException`) so that a hard stop (or Ctrl+C) leaves the harmless entry instead of racing a half-done rollback; the tests simulate the hard stop with a `BaseException`. Orphans created by *older* versions are recovered by F34's marker files.
 
 ### F8 — `.bak` rename
 - **Status:** pending · **Location (verified):** `migrate.py:66`, twin `fixes.py:593` · **Doctor rule:** none (migration helper)
@@ -236,3 +241,18 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 ### F35 — sync to Gemini CLI unprobed
 - **Status:** pending · **Location (verified):** `sync.py:34–83`, `paths.py:182–191` · **Doctor rule:** none (command-time probe raises `SyncError`)
 - **Change / files / tests / evidence:** pending.
+
+## Phase gates
+
+### Phase 1 (P0: F5, F14, F3, F2, F6, F1, F4) — G2
+| Check | Result |
+|---|---|
+| `pytest -q`, Windows 11 / Python 3.14 | **270 passed, 6 skipped** (POSIX-only + symlink privilege) |
+| `pytest -q`, WSL Ubuntu-24.04 / Python 3.12 (POSIX parity, offline venv) | **272 passed, 4 skipped** (PowerShell-only) |
+| `pytest -q`, Windows / Python 3.11 (3.10 is not installed locally; static scan for 3.11+-only APIs found none; ruff target py310 clean) | **270 passed, 6 skipped** |
+| Coverage | **86%** (baseline 85%; floor 84%) |
+| `ruff check src tests scripts` | clean |
+| `agflow doctor --path plugin --strict` | 0 errors / 0 warnings / 0 info |
+| `agflow doctor` on an installed, realistic sandboxed workspace (user skill + rule + MCP + graph + global install) | 0 / 0 / 0 |
+| Real `~/.gemini` after the Incident I-1 repair | untouched since 08:11 (install.json, GEMINI.md timestamps) |
+| Sync audits S1–S10 | not yet automated (Phase 4). Manual sweep for this phase: S6 `stream-ticket` ↔ `app.js` consistent; S7 install→uninstall round-trip covered by 6 tests; S9 README updated for hooks, install, dashboard auth, run ownership |
