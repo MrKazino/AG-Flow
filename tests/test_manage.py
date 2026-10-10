@@ -118,3 +118,69 @@ def test_sync_gemini_cli(home):
     assert (home / ".gemini" / "skills" / "plan-spec" / "SKILL.md").is_file()
     assert (home / ".gemini" / "skills" / "tdd" / "SKILL.md").read_text() == "user-owned"
     assert any("tdd" in s for s in report.skipped)
+
+
+# --- F5: one corrupt agflow-owned file must never take discovery down -----------------------------------------
+
+
+def _write_disabled_index(workspace, body: str | bytes):
+    f = paths.workspace_state_dir(workspace) / "disabled" / "index.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(body, bytes):
+        f.write_bytes(body)
+    else:
+        f.write_text(body, encoding="utf-8")
+    return f
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param("{not json", id="invalid-json"),
+    pytest.param(json.dumps({"kind": "skill"}), id="not-a-list"),
+    pytest.param(json.dumps(["just a string"]), id="entry-not-an-object"),
+    pytest.param(json.dumps([{"kind": "bogus", "name": "x", "parked_path": ".", "original_path": "o"}]),
+                 id="unknown-kind"),
+    pytest.param(json.dumps([{"kind": "skill"}]), id="missing-key"),
+    pytest.param(b"\xff\xfe\x00garbage", id="not-utf8"),
+])
+def test_discover_survives_corrupt_disabled_index(workspace, body):
+    index = _write_disabled_index(workspace, body)
+    inv = Inventory.discover(workspace, include_global=False, include_legacy=False)  # must not raise
+    assert any(path == index for path, _ in inv.load_errors)
+
+
+def test_valid_entries_next_to_a_bad_one_still_load(workspace):
+    parked = workspace / ".agents" / "agflow" / "disabled" / "skills" / "workspace" / "kept"
+    write(parked / "SKILL.md", "---\nname: kept\ndescription: " + "d" * 50 + "\n---\nbody\n")
+    index = _write_disabled_index(workspace, json.dumps([
+        {"kind": "bogus", "name": "bad", "parked_path": str(parked), "original_path": "o"},
+        {"kind": "skill", "name": "kept", "scope": "workspace", "parked_path": str(parked),
+         "original_path": str(workspace / ".agents" / "skills" / "kept")},
+    ]))
+    inv = Inventory.discover(workspace, include_global=False, include_legacy=False)
+    assert inv.find(Kind.SKILL, "kept", enabled=False) is not None
+    errors = [msg for path, msg in inv.load_errors if path == index]
+    assert len(errors) == 1 and "entry #0" in errors[0]
+
+
+def test_corrupt_disabled_index_is_reported_by_doctor(workspace):
+    from agflow.validate import validate_inventory
+
+    index = _write_disabled_index(workspace, "{not json")
+    issues = validate_inventory(Inventory.discover(workspace, include_global=False, include_legacy=False))
+    assert [i for i in issues if i.code == "load" and i.path == index]
+
+
+def test_discover_survives_corrupt_plugin_manifest(workspace):
+    plugin = workspace / ".agents" / "plugins" / "broken"
+    write(plugin / "plugin.json", "{broken")
+    inv = Inventory.discover(workspace, include_global=False, include_legacy=False)
+    assert any(path == plugin / "plugin.json" for path, _ in inv.load_errors)
+
+
+@pytest.mark.parametrize("name", ["GEMINI.md", "mcp_config.json", "hooks.json"])
+def test_discover_survives_non_utf8_plugin_files(workspace, name):
+    plugin = workspace / ".agents" / "plugins" / "binary"
+    write(plugin / "plugin.json", json.dumps({"name": "binary", "version": "1", "description": "d"}))
+    (plugin / name).write_bytes(b"\xff\xfe\x00\x80 not utf-8")
+    inv = Inventory.discover(workspace, include_global=False, include_legacy=False)
+    assert any(path == plugin / name for path, _ in inv.load_errors)

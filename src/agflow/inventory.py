@@ -136,9 +136,33 @@ class Inventory:
         self.items.append(item)
         return item
 
+    def _json(self, path: Path, default: Any) -> Any:
+        """Read a JSON file whose content agflow does not control.
+
+        Discovery must survive any single bad file (doctor, the dashboard and the hooks all start from it), so a
+        file that cannot be read or parsed is recorded in ``load_errors`` -- where doctor reports it -- and
+        ``default`` is returned.
+        """
+        try:
+            return read_json(path, default)
+        except json.JSONDecodeError as exc:
+            self.load_errors.append((path, f"invalid JSON: {exc}"))
+        except UnicodeDecodeError as exc:
+            self.load_errors.append((path, f"not valid UTF-8 text: {exc}"))
+        except OSError as exc:
+            self.load_errors.append((path, f"unreadable: {exc}"))
+        return default
+
+    def _json_object(self, path: Path) -> dict[str, Any]:
+        data = self._json(path, {}) or {}
+        if not isinstance(data, dict):
+            self.load_errors.append((path, f"expected a JSON object, got {type(data).__name__}"))
+            return {}
+        return data
+
     def _scan_layout(self, lay: Layout, scope: str) -> None:
         if lay.scope == Scope.PLUGIN:
-            manifest = read_json(lay.root / "plugin.json", {}) or {}
+            manifest = self._json_object(lay.root / "plugin.json")
             self._add(
                 Kind.PLUGIN,
                 manifest.get("name", lay.root.name),
@@ -148,8 +172,12 @@ class Inventory:
                 meta={"version": manifest.get("version", "")},
             )
         if lay.gemini_md and lay.gemini_md.is_file():
-            self._add(Kind.GEMINI_MD, "GEMINI.md", lay.gemini_md, scope,
-                      meta={"chars": len(lay.gemini_md.read_text(encoding="utf-8"))})
+            try:
+                chars = len(lay.gemini_md.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                self.load_errors.append((lay.gemini_md, f"unreadable: {exc}"))
+                chars = 0
+            self._add(Kind.GEMINI_MD, "GEMINI.md", lay.gemini_md, scope, meta={"chars": chars})
         for p in iter_markdown(lay.rules_dir):
             meta, _, _ = _meta_of(p)  # parse errors are reported by validate.validate_rule
             self._add(Kind.RULE, p.stem, p, scope, description=str(meta.get("description", "")),
@@ -169,21 +197,13 @@ class Inventory:
                 meta, _, _ = _meta_of(p)
                 self._add(Kind.WORKFLOW, p.stem, p, scope, description=str(meta.get("description", "")))
         if lay.mcp_file and lay.mcp_file.is_file():
-            try:
-                servers = (read_json(lay.mcp_file, {}) or {}).get("mcpServers", {}) or {}
-            except (json.JSONDecodeError, AttributeError) as exc:
-                self.load_errors.append((lay.mcp_file, f"invalid JSON: {exc}"))
-                servers = {}
+            servers = self._json_object(lay.mcp_file).get("mcpServers", {}) or {}
             for name, cfg in servers.items() if isinstance(servers, dict) else []:
                 cfg = cfg if isinstance(cfg, dict) else {}
                 self._add(Kind.MCP, name, lay.mcp_file, scope, enabled=not cfg.get("disabled", False),
                           description=_describe_mcp(cfg), meta={"config": cfg})
         if lay.hooks_file and lay.hooks_file.is_file():
-            try:
-                hooks = (read_json(lay.hooks_file, {}) or {}).get("hooks", {}) or {}
-            except (json.JSONDecodeError, AttributeError) as exc:
-                self.load_errors.append((lay.hooks_file, f"invalid JSON: {exc}"))
-                hooks = {}
+            hooks = self._json_object(lay.hooks_file).get("hooks", {}) or {}
             for event, entries in hooks.items() if isinstance(hooks, dict) else []:
                 for idx, entry in enumerate(entries if isinstance(entries, list) else []):
                     entry = entry if isinstance(entry, dict) else {}
@@ -194,12 +214,22 @@ class Inventory:
             self._add(Kind.GRAPH, p.stem, p, scope)
 
     def _scan_disabled(self, state_dir: Path) -> None:
-        index = read_json(state_dir / "disabled" / "index.json", []) or []
-        for entry in index:
-            parked = Path(entry["parked_path"])
+        index_file = state_dir / "disabled" / "index.json"
+        index = self._json(index_file, []) or []
+        if not isinstance(index, list):
+            self.load_errors.append((index_file, f"expected a JSON list of entries, got {type(index).__name__}"))
+            return
+        for n, entry in enumerate(index):
+            try:
+                kind, name = Kind(entry["kind"]), entry["name"]
+                parked, original = Path(entry["parked_path"]), entry["original_path"]
+            except (KeyError, TypeError, ValueError) as exc:
+                # one bad entry must not hide the others: report it and keep going
+                self.load_errors.append((index_file, f"entry #{n}: {type(exc).__name__}: {exc}"))
+                continue
             if parked.exists():
-                self._add(Kind(entry["kind"]), entry["name"], parked, entry.get("scope", "?"),
-                          enabled=False, meta={"original_path": entry["original_path"]})
+                self._add(kind, name, parked, entry.get("scope", "?"), enabled=False,
+                          meta={"original_path": original})
 
 
 def _state_dirs(workspace: Path | None, include_global: bool) -> list[Path]:

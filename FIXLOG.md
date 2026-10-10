@@ -58,9 +58,14 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Change / files / tests / evidence:** pending.
 
 ### F5 — corrupt disabled-index crashes discovery
-- **Status:** pending · **Location (verified):** `inventory.py:196–202` (+ sibling `:141`, `:152`) · **Doctor rule:** existing `load`
+- **Status:** fixed · **Location (verified):** `inventory.py:196–202` (+ sibling `:141`, `:152`) · **Doctor rule:** existing `load` (ERROR) now carries every one of these
 - **Phase-0 evidence:** `JSONDecodeError` / `ValueError` / `KeyError` escape `Inventory.discover`.
-- **Change / files / tests / evidence:** pending.
+- **Root cause:** discovery parsed agflow's *own* state (disabled index) and several plugin files with unguarded reads, while mcp/hooks readers had been guarded one by one.
+- **Change:** one guarded reader `Inventory._json` / `_json_object` (JSON, UTF-8 and OS errors → `load_errors`, never raised) used by the plugin manifest, mcp, hooks and the disabled index; the index is validated as a list and **each entry is parsed on its own** (`entry #n: <error>`), so a bad entry no longer hides its valid neighbours; unreadable `GEMINI.md` is recorded (chars=0) instead of crashing. Non-object mcp/hooks/manifest JSON now reports "expected a JSON object" instead of a misleading "invalid JSON".
+- **Files:** `src/agflow/inventory.py`, `tests/test_manage.py`.
+- **Tests added (12; all failed on `bf8c178`):** `test_discover_survives_corrupt_disabled_index` ×6 (invalid JSON, not a list, entry not an object, unknown kind, missing key, not UTF-8), `test_valid_entries_next_to_a_bad_one_still_load`, `test_corrupt_disabled_index_is_reported_by_doctor`, `test_discover_survives_corrupt_plugin_manifest`, `test_discover_survives_non_utf8_plugin_files` ×3.
+- **Evidence (G1/G2):** 187 passed, 1 skipped (was 175+1); `ruff` clean.
+- **Follow-up in F9:** `validate_gemini_md` must skip an item already reported unreadable here.
 
 ### F6 — non-atomic plugin switch
 - **Status:** pending · **Location (verified):** `install.py:167–204` · **Doctor rule:** planned `install.interrupted`
