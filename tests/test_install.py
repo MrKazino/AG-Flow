@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -89,7 +90,7 @@ def test_dry_run_changes_nothing(home):
     assert not (home / ".gemini").exists()
 
 
-def test_link_install(home, plugin_dir):
+def test_link_install(home, plugin_dir, require_symlinks):
     install("global", link=True, with_gemini_md=False)
     target = paths.global_layout().plugins_dir / "agflow"
     assert target.is_symlink() and target.resolve() == plugin_dir.resolve()
@@ -140,7 +141,7 @@ def test_agflow_command_prefers_the_running_executable(tmp_path, monkeypatch):
     monkeypatch.setattr(inst.shutil, "which", lambda name: "/somewhere/else/agflow")  # an older copy on PATH
     assert inst.agflow_command() == [str(running.absolute())]
     monkeypatch.setattr(inst.sys, "argv", ["-c"])  # not launched via the agflow script
-    sibling = Path(inst.sys.executable).parent / "agflow"
+    sibling = Path(inst.sys.executable).parent / ("agflow.exe" if os.name == "nt" else "agflow")
     expected = [str(sibling.absolute())] if sibling.is_file() else ["/somewhere/else/agflow"]
     assert inst.agflow_command() == expected
 

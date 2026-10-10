@@ -23,17 +23,20 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 | ID | Test | Change | Justification | Commit |
 |---|---|---|---|---|
 | A1 | `test_dashboard.py::test_auth_and_host_checks` | query-token assertion 200 → 401 | encodes the behaviour F1 removes | pending |
-| A2 | `test_easy_install.py::test_sh_half_parses[bash]` | script via stdin | baseline failure: path given to WSL launcher | pending |
-| A3 | `test_install.py::test_link_install` | skip if symlinks unsupported | baseline failure: WinError 1314 | pending |
-| A4 | `test_install.py::test_agflow_command_prefers_the_running_executable` | launcher name via `os.name` | baseline failure: POSIX name on Windows | pending |
+| A2 | `test_easy_install.py::test_sh_half_parses[bash]` | script via stdin | baseline failure: path given to WSL launcher | T0 |
+| A3 | `test_install.py::test_link_install` | skip if symlinks unsupported | baseline failure: WinError 1314 | T0 |
+| A4 | `test_install.py::test_agflow_command_prefers_the_running_executable` | launcher name via `os.name` | baseline failure: POSIX name on Windows | T0 |
 | A5 | `test_easy_install.py::test_find_wheel_and_requirement` | `sleep` → `os.utime` | F28 | pending |
 | A6 | `test_runner.py::test_interrupt_releases_running_nodes` | `sleep` → `asyncio.Event` | F28 | pending |
 
 ## Findings
 
 ### T0 — baseline test portability
-- **Status:** pending · **Location:** `tests/test_easy_install.py`, `tests/test_install.py`, `tests/conftest.py`
-- **Root cause:** tests assume POSIX paths/launcher names/symlink privilege. **Change / files / tests / evidence:** pending. **Doctor rule:** none (test-only).
+- **Status:** fixed · **Location:** `tests/test_easy_install.py`, `tests/test_install.py`, `tests/conftest.py` · **Doctor rule:** none (test-only)
+- **Root cause:** three tests assumed POSIX: a path argument handed to whatever `bash` resolves to (the WSL launcher on Windows), a bare `agflow` launcher name, and unprivileged symlink creation.
+- **Change:** `test_sh_half_parses` feeds the script on stdin (same syntax check, no path translation; sanity-checked that `bash -n` on stdin still rejects a broken script, exit 2); `test_agflow_command_prefers_the_running_executable` derives the launcher name from `os.name` exactly like `install.agflow_command`; `test_link_install` uses a new `require_symlinks` fixture (conftest `symlinks_supported`) that skips *with a reason* when symlinks are not permitted.
+- **Tests added:** none (fixes to existing tests, amendments A2–A4).
+- **Evidence (G2):** `pytest tests/test_easy_install.py tests/test_install.py` → 29 passed, 1 skipped (symlink privilege; runs in WSL/CI). `ruff check tests` clean.
 
 ### F1 — SSE token in query string
 - **Status:** pending · **Location (verified):** `dashboard/app.py:67`, `static/app.js:520` · **Doctor rule:** none (HTTP surface; guarded by `test_dashboard`)

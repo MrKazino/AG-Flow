@@ -34,7 +34,9 @@ def test_polyglot_structure():
 def test_sh_half_parses(shell):
     if not shutil.which(shell):
         pytest.skip(f"{shell} not installed")
-    assert subprocess.run([shell, "-n", str(BAT)]).returncode == 0
+    # The script goes in on stdin: a path argument is resolved by the shell's own filesystem view, which on
+    # Windows may be a WSL launcher that cannot see a Windows path. The syntax check is identical.
+    assert subprocess.run([shell, "-n"], input=BAT.read_bytes()).returncode == 0
 
 
 def test_help_runs_through_the_polyglot():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,28 @@ def write(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def symlinks_supported(probe_dir: Path) -> bool:
+    """Whether this process may create symlinks (Windows needs Developer Mode or elevation)."""
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    target, link = probe_dir / "probe-target", probe_dir / "probe-link"
+    target.write_text("x", encoding="utf-8")
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        return False
+    finally:
+        link.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+    return True
+
+
+@pytest.fixture
+def require_symlinks(tmp_path: Path) -> None:
+    """Skip (with the reason) on systems where symlink creation is not permitted."""
+    if not symlinks_supported(tmp_path / "symlink-probe"):
+        pytest.skip("creating symlinks is not permitted here (Windows without Developer Mode/elevation)")
 
 
 @pytest.fixture
