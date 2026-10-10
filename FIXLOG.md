@@ -115,9 +115,13 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Note:** a crash model detail — the rollback is `except Exception` (not `BaseException`) so that a hard stop (or Ctrl+C) leaves the harmless entry instead of racing a half-done rollback; the tests simulate the hard stop with a `BaseException`. Orphans created by *older* versions are recovered by F34's marker files.
 
 ### F8 — `.bak` rename
-- **Status:** pending · **Location (verified):** `migrate.py:66`, twin `fixes.py:593` · **Doctor rule:** none (migration helper)
-- **Phase-0 evidence (Windows):** `FileExistsError` when `.bak` exists.
-- **Change / files / tests / evidence:** pending.
+- **Status:** fixed · **Location (verified):** `migrate.py:66`, twin `fixes.py:593` · **Doctor rule:** none (migration helper; guarded by the tests below)
+- **Phase-0 evidence (Windows):** `FileExistsError` when `ship.md.bak` exists; on POSIX `rename(2)` silently replaces it.
+- **Root cause:** a fixed backup name combined with a rename whose overwrite behaviour differs per platform.
+- **Change:** `fsutil.unique_sibling(path, suffix=".bak")` returns the first free of `x.bak`, `x.bak2`, `x.bak3`, … (a dangling symlink counts as taken). `migrate_workflows` and `fixes._fix_workflow` — the two places that rename a converted workflow — both use it, so the preview (`report.actions`, fix `changes`) and the real run name the *actual* destination, in dry-run too.
+- **Files:** `src/agflow/fsutil.py`, `src/agflow/migrate.py`, `src/agflow/fixes.py`, `CHANGELOG.md`, `tests/test_fsutil.py`, `tests/test_manage.py`, `tests/test_fixes.py`.
+- **Tests added (6; 5 fail on `bf8c178`, the 6th needs symlink privilege):** `unique_sibling` sequence; dangling symlink counts as taken; migrate keeps an existing `.bak` and uses `.bak2`; migrating three rounds yields `.bak/.bak2/.bak3` with the right contents; the dry run announces the name the real run uses; the workflow *fix* keeps an earlier `.bak`, previews the real destination and `fix --undo` removes `.bak2` and restores the workflow.
+- **Evidence:** Windows (where the old code crashed) and WSL (where it silently overwrote) both green for the three test files; `ruff` clean.
 
 ### F9 — unguarded reads crash doctor
 - **Status:** pending · **Location (verified):** `validate.py:69,216,245,271` (+`:94`,`:314`) · **Doctor rule:** existing `unreadable`

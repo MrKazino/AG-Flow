@@ -27,6 +27,10 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
   token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.
 
 ### Fixed
+- **Migrating a workflow never loses or crashes on an earlier `.bak` (F8).** `agflow migrate` / `agflow fix` kept
+  the original workflow as `<name>.md.bak` by renaming onto that name: on Windows a second migration crashed with
+  `FileExistsError`, on Linux/macOS it silently replaced the previous backup. They now use the first free name
+  (`.bak`, `.bak2`, `.bak3`, …), identically on every platform, and the preview shows the real name.
 - **Disabling a skill/agent/rule can no longer orphan it (F7).** `disable` moved the item first and recorded it in
   the index second, so a crash in between left it parked but invisible and impossible to re-enable. It now records
   first and moves second; a leftover entry from an interrupted disable is harmless and is healed by the next

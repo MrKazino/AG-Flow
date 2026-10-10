@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agflow import frontmatter, paths
-from agflow.fsutil import atomic_write_text, read_json, write_json
+from agflow.fsutil import atomic_write_text, read_json, unique_sibling, write_json
 
 _TURBO = re.compile(r"^\s*//\s*turbo(-all)?\s*$", re.MULTILINE)
 
@@ -60,10 +60,11 @@ def migrate_workflows(workspace: Path | None, *, include_global: bool = True, dr
             if target.exists():
                 report.conflicts.append(f"skill '{name}' already exists at {target}; skipped {wf}")
                 continue
-            report.actions.append(f"workflow {wf} -> {target} (original kept as {wf.name}.bak)")
+            bak = unique_sibling(wf)  # never onto an existing backup (Windows raises, POSIX would overwrite it)
+            report.actions.append(f"workflow {wf} -> {target} (original kept as {bak.name})")
             if not dry_run:
                 atomic_write_text(target, workflow_to_skill(wf.read_text(encoding="utf-8"), name))
-                wf.rename(wf.with_name(wf.name + ".bak"))
+                wf.rename(bak)
     return report
 
 

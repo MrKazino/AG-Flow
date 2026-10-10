@@ -313,3 +313,16 @@ def test_doctor_fix_yes_without_terminal_skips_choices(home, workspace):
     r = _cli("doctor", "-w", workspace, "--fix", "--yes")
     assert not wf.exists() and rule.read_text() == "Alpha rule.\n"
     assert "skipped (needs a choice)" in r.output and r.exit_code == 1  # the rule error remains
+
+
+def test_workflow_fix_never_overwrites_an_earlier_bak_and_still_undoes(home, workspace):
+    wf = write(workspace / ".agents" / "workflows" / "ship.md", "---\ndescription: Ship it\n---\n1. Ship\n")
+    earlier = write(workspace / ".agents" / "workflows" / "ship.md.bak", "an earlier backup\n")
+    plan = fixes.build_plan(workspace)
+    fix = fix_for(plan, "workflow.deprecated")
+    assert any("ship.md.bak2" in c for c in fix.options[0].changes)  # the preview names the real destination
+    result = fixes.apply(workspace, fixes.select(plan))
+    assert not result.failed
+    assert earlier.read_text() == "an earlier backup\n" and (wf.parent / "ship.md.bak2").is_file()
+    fixes.undo_last()
+    assert wf.is_file() and not (wf.parent / "ship.md.bak2").exists() and earlier.read_text() == "an earlier backup\n"

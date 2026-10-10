@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from agflow import frontmatter, paths
-from agflow.fsutil import read_json, write_json
+from agflow.fsutil import read_json, unique_sibling, write_json
 from agflow.inventory import Inventory
 from agflow.models import Issue, Item, Kind, Level
 from agflow.validate import AGENT_EXEC_POLICIES, NAME_RE, RULE_TRIGGERS, summarize, validate_inventory
@@ -588,12 +588,14 @@ def _fix_workflow(issue: Issue, inv: Inventory) -> Fix | Manual:
         return _manual(issue, extra=[f"A skill named '{name}' already exists ({target}); rename the workflow file "
                                      "and run `agflow fix` again."])
 
+    bak = unique_sibling(wf)  # the same naming rule as `agflow migrate`; never onto an earlier backup
+
     def apply(txn: Txn) -> None:
         txn.write(target, workflow_to_skill(_read(wf), name))
-        txn.move(wf, wf.with_name(wf.name + ".bak"))
+        txn.move(wf, bak)
 
     return _fix(issue, f"Convert workflow '{wf.stem}' into the skill /{name}", "safe",
-                [Option("convert", "Convert to a skill", [f"create {target}", f"rename {wf} -> {wf.name}.bak"],
+                [Option("convert", "Convert to a skill", [f"create {target}", f"rename {wf} -> {bak.name}"],
                         apply)])
 
 

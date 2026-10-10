@@ -136,6 +136,19 @@ def backup(path: Path, backup_root: Path, anchor: Path) -> Path | None:
     return dest
 
 
+def unique_sibling(path: Path, suffix: str = ".bak") -> Path:
+    """A name next to ``path`` that is not taken: ``x.md.bak``, else ``x.md.bak2``, ``x.md.bak3``, ...
+
+    Renaming onto an existing file raises on Windows and silently replaces it on POSIX; either way an earlier
+    backup is lost or the operation crashes. Choosing a free name makes both platforms behave the same."""
+    candidate = path.with_name(path.name + suffix)
+    n = 2
+    while candidate.exists() or candidate.is_symlink():  # is_symlink: a dangling link still occupies the name
+        candidate = path.with_name(f"{path.name}{suffix}{n}")
+        n += 1
+    return candidate
+
+
 def remove(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()

@@ -289,3 +289,36 @@ def test_doctor_reports_stale_and_lost_disabled_entries(workspace):
                                                                        include_legacy=False))}
     assert issues["disabled.stale"].level.value == "info" and "mine" in issues["disabled.stale"].message
     assert issues["disabled.lost"].level.value == "warning" and "gone" in issues["disabled.lost"].message
+
+
+# --- F8: migrating a workflow never loses an earlier .bak -------------------------------------------------------------
+
+
+def test_migrate_keeps_an_existing_bak_and_uses_the_next_free_name(workspace):
+    wf = write(workspace / ".agents" / "workflows" / "ship.md", "---\ndescription: Ship\n---\nsecond version\n")
+    earlier = write(workspace / ".agents" / "workflows" / "ship.md.bak", "an earlier backup\n")
+    report = migrate_all(workspace, include_global=False)  # raised FileExistsError on Windows, overwrote on POSIX
+    assert earlier.read_text() == "an earlier backup\n"
+    assert "second version" in (workspace / ".agents" / "workflows" / "ship.md.bak2").read_text()
+    assert not wf.exists() and any("ship.md.bak2" in a for a in report.actions)
+
+
+def test_migrating_the_same_workflow_again_creates_bak2_then_bak3(workspace):
+    import shutil
+
+    wf_dir = workspace / ".agents" / "workflows"
+    for round_ in (1, 2, 3):
+        write(wf_dir / "ship.md", f"---\ndescription: Ship\n---\nround {round_}\n")
+        migrate_all(workspace, include_global=False)
+        shutil.rmtree(workspace / ".agents" / "skills" / "ship")  # so the next round is not a skill-name conflict
+    names = ("ship.md.bak", "ship.md.bak2", "ship.md.bak3")
+    assert [(wf_dir / n).read_text().strip().splitlines()[-1] for n in names] == ["round 1", "round 2", "round 3"]
+
+
+def test_dry_run_announces_the_name_the_real_run_will_use(workspace):
+    write(workspace / ".agents" / "workflows" / "ship.md", "---\ndescription: Ship\n---\nsteps\n")
+    write(workspace / ".agents" / "workflows" / "ship.md.bak", "old\n")
+    dry = migrate_all(workspace, include_global=False, dry_run=True)
+    assert any("kept as ship.md.bak2" in a for a in dry.actions)
+    real = migrate_all(workspace, include_global=False)
+    assert any("kept as ship.md.bak2" in a for a in real.actions)

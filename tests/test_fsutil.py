@@ -113,3 +113,24 @@ def test_json_and_yaml_writers_inherit_the_behaviour(tmp_path: Path, fsync_calls
     fsutil.write_json(tmp_path / "d.json", {"a": 1})
     fsutil.write_yaml(tmp_path / "d.yaml", {"a": 1})
     assert fsync_calls.count("file") == 2
+
+
+# --- F8: a backup name that never collides --------------------------------------------------------------------------
+
+
+def test_unique_sibling_walks_bak_bak2_bak3(tmp_path: Path):
+    f = tmp_path / "ship.md"
+    f.write_text("wf", encoding="utf-8")
+    assert fsutil.unique_sibling(f) == tmp_path / "ship.md.bak"
+    (tmp_path / "ship.md.bak").write_text("1", encoding="utf-8")
+    assert fsutil.unique_sibling(f) == tmp_path / "ship.md.bak2"
+    (tmp_path / "ship.md.bak2").write_text("2", encoding="utf-8")
+    assert fsutil.unique_sibling(f) == tmp_path / "ship.md.bak3"
+    assert fsutil.unique_sibling(f, ".orig") == tmp_path / "ship.md.orig"  # other suffixes are independent
+
+
+def test_unique_sibling_treats_a_dangling_symlink_as_taken(tmp_path: Path, require_symlinks: None):
+    f = tmp_path / "ship.md"
+    f.write_text("wf", encoding="utf-8")
+    os.symlink(tmp_path / "nowhere", tmp_path / "ship.md.bak")  # exists() is False for a dangling link
+    assert fsutil.unique_sibling(f) == tmp_path / "ship.md.bak2"
