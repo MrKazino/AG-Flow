@@ -1,10 +1,13 @@
 import asyncio
+import time
 
 import pytest
 
+from agflow.graph import engine
 from agflow.graph.catalog import list_graphs, resolve
 from agflow.graph.schema import coerce_inputs
 from agflow.graph.store import RunStore, lookup_workspace
+from agflow.runner import runner as runner_module
 from agflow.runner.backends import FakeBackend, NodeResult, parse_result_text
 from agflow.runner.runner import EXIT_FAILED, EXIT_OK, EXIT_WAITING, approve, exit_code, run_graph
 
@@ -103,3 +106,71 @@ def test_parse_result_text():
     assert parse_result_text("no json here").status == "failed"
     two = '```json\n{"status": "failed", "summary": "old"}\n```\n```json\n{"status": "rejected", "summary": "new"}\n```'
     assert parse_result_text(two).summary == "new"
+
+
+# --- F2: a concurrent report (e.g. the MCP orchestrator) must not destroy the run --------------------------------
+
+
+def test_concurrent_mcp_report_does_not_kill_the_run(workspace):
+    store, state = start(workspace, "bugfix", INPUTS["bugfix"])
+
+    class ReportedElsewhere(FakeBackend):
+        """The orchestrator reports each node through the shared store while the runner is still working on it."""
+
+        async def run(self, card):
+            with store.transaction(state.run_id) as s:
+                engine.report(s.graph_model(), s, card["node_id"], "succeeded", now=time.time(), summary="via MCP")
+            return await super().run(card)
+
+    events = []
+    final = asyncio.run(run_graph(store, state.run_id, ReportedElsewhere(), on_event=events.append))
+    assert final.status == "succeeded"
+    assert not [n for n, ns in final.nodes.items() if ns.status.value == "running"]
+    assert final.nodes["reproduce"].summary == "via MCP"  # the first report wins; the runner's own result is dropped
+    conflicts = [e for e in events if e["event"] == "report_conflict"]
+    assert conflicts and all("not running" in c["reason"] for c in conflicts)
+    assert any(e.get("event") == "report_conflict" for e in store.read_ledger(state.run_id))  # visible, not swallowed
+
+
+def test_human_auto_approve_conflict_is_tolerated(workspace, monkeypatch):
+    store, state = start(workspace, "release", INPUTS["release"])
+    real_report = runner_module._report
+
+    def human_answers_first(store_, run_id, node_id, result, log):
+        if node_id == "approve":
+            approve(store_, run_id, "approve", approved=True, note="the human got there first")
+        return real_report(store_, run_id, node_id, result, log)
+
+    monkeypatch.setattr(runner_module, "_report", human_answers_first)
+    events = []
+    final = asyncio.run(run_graph(store, state.run_id, FakeBackend(), approve_human=True, on_event=events.append))
+    assert final.status == "succeeded"
+    assert final.nodes["approve"].summary == "the human got there first"
+    assert [e for e in events if e["event"] == "report_conflict" and e["node"] == "approve"]
+
+
+def test_report_to_an_aborted_run_is_a_logged_conflict_not_a_crash(workspace):
+    store, state = start(workspace, "bugfix", INPUTS["bugfix"])
+
+    class AbortedMidFlight(FakeBackend):
+        async def run(self, card):
+            with store.transaction(state.run_id) as s:
+                engine.abort(s, "stopped from the dashboard", now=time.time())
+            return await super().run(card)
+
+    events = []
+    final = asyncio.run(run_graph(store, state.run_id, AbortedMidFlight(), on_event=events.append))
+    assert final.status == "aborted"
+    assert [e for e in events if e["event"] == "report_conflict" and "aborted" in e["reason"]]
+
+
+def test_unrelated_exceptions_still_stop_the_run(workspace, monkeypatch):
+    """The guard is for EngineError only: anything else is a bug and must not be swallowed."""
+    store, state = start(workspace, "bugfix", INPUTS["bugfix"])
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(runner_module, "_report", broken)
+    with pytest.raises(RuntimeError, match="disk on fire"):
+        asyncio.run(run_graph(store, state.run_id, FakeBackend()))

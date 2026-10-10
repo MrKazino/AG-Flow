@@ -73,10 +73,21 @@ async def run_graph(store: RunStore, run_id: str, backend: AgentBackend, *, appr
 
 
 def _report(store: RunStore, run_id: str, node_id: str, result: NodeResult, log: EventSink) -> None:
-    with store.transaction(run_id) as state:
-        g = state.graph_model()
-        events = engine.report(g, state, node_id, result.status, now=time.time(), summary=result.summary,
-                               artifacts=result.artifacts, followups=result.followups)
+    """Record a node's result. The first report for a node wins.
+
+    Whoever claimed a node owns its report (see the graph-run skill). If the engine refuses this one -- the node
+    is no longer running because another driver (typically the MCP orchestrator) already settled it, or the run
+    was aborted meanwhile -- the result is discarded and the conflict is logged; the run itself carries on.
+    ``transaction()`` does not write state when its body raises, so a refused report changes nothing.
+    """
+    try:
+        with store.transaction(run_id) as state:
+            g = state.graph_model()
+            events = engine.report(g, state, node_id, result.status, now=time.time(), summary=result.summary,
+                                   artifacts=result.artifacts, followups=result.followups)
+    except engine.EngineError as exc:
+        log({"event": "report_conflict", "node": node_id, "status": result.status, "reason": str(exc)})
+        return
     log({"event": "reported", "node": node_id, "status": result.status, "summary": result.summary[:500]})
     for e in events:
         log(e)

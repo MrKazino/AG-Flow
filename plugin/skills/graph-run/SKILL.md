@@ -30,6 +30,7 @@ The server handles retries (`failed`), rework loops (a gate after `rejected` res
 - Session restarted or unsure of state → `graph_runs(workspace, only_active=true)` → `graph_status(run_id)`.
 - Subagents died mid-flight → `graph_resume(run_id)` returns running nodes to ready without burning attempts.
 - User wants to stop → `graph_abort(run_id, reason)`.
+- **One driver per run.** Whoever claimed a node owns its report. Don't also drive this run from `agflow graph run` (the headless runner): the first report for a node wins, and a later one is rejected with `node '<id>' is succeeded, not running` — treat that as "someone else already settled it", don't retry, and move on to `graph_next`.
 
 ## 4. Finish
 `graph_status(run_id, verbose=true)` → walkthrough for the user:

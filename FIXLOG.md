@@ -44,9 +44,14 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Change / files / tests / evidence:** pending.
 
 ### F2 — concurrent MCP report destroys the headless run
-- **Status:** pending · **Location (verified):** `runner/runner.py:60` (+`:43`) · **Doctor rule:** none (event `report_conflict`)
+- **Status:** fixed · **Location (verified):** `runner/runner.py:60` (+`:43`) · **Doctor rule:** none — the signal is a `report_conflict` event (CLI output, `ledger.jsonl`, dashboard ledger)
 - **Phase-0 evidence:** `EngineError: node 'reproduce' is succeeded, not running…`, run left `running`.
-- **Change / files / tests / evidence:** pending.
+- **Root cause:** `_report` is the only place a node's result is written and it assumed it was the sole reporter. `engine.report` correctly refuses a stale report, but the runner treated that refusal as fatal and its `finally` then cancelled every in-flight node.
+- **Change:** `_report` catches `engine.EngineError` only, logs `{"event": "report_conflict", node, status, reason}` and returns; the run continues. A refused report changes no state (`transaction()` skips the write when its body raises). Covers both call sites (backend results and `--approve-human` auto-approval) and the "run aborted meanwhile" case. **Ownership rule** documented: whoever claims a node owns its report; the first report wins; one driver per run (graph-run SKILL, README).
+- **Files:** `src/agflow/runner/runner.py`, `plugin/skills/graph-run/SKILL.md`, `README.md`, `CHANGELOG.md`, `tests/test_runner.py`.
+- **Tests added (4; 3 fail on `bf8c178`, 1 is an over-catching guard):** `test_concurrent_mcp_report_does_not_kill_the_run` (the Phase-0 probe; first report wins, conflict in events *and* ledger), `test_human_auto_approve_conflict_is_tolerated`, `test_report_to_an_aborted_run_is_a_logged_conflict_not_a_crash`, `test_unrelated_exceptions_still_stop_the_run`.
+- **Evidence:** see commit; Windows + WSL full suites green; `agflow doctor --path plugin --strict` 0/0.
+- **Not fixed (observation N9):** if `_report` itself raises an unrelated error, the node just popped from `tasks` is not in the `finally` release list and stays `running` until its lease expires. Pre-existing, outside F2's EngineError scope.
 
 ### F3 — PostToolUse parses all runs
 - **Status:** fixed · **Location (verified):** `graph/store.py:109–123`, `hooks.py:181–199` · **Doctor rules:** `runs.corrupt` (WARNING), `runs.index.corrupt` (WARNING) — *replaces the planned `runs.index.stale`: readers self-heal staleness, so only unreadable runs and a rebuilt index remain worth surfacing (PLAN §12 D-1)*

@@ -13,6 +13,11 @@ _(entries are added with each fix)_
 _(entries are added with each fix)_
 
 ### Fixed
+- **A concurrent report no longer destroys a headless run (F2).** If the MCP orchestrator reported a node that
+  `agflow graph run` was also working on (or the run was aborted from the dashboard meanwhile), the engine's
+  "node is not running" rejection used to escape the runner, which then cancelled every in-flight node. The
+  first report for a node now wins; the runner drops its late result, logs a `report_conflict` event and
+  carries on. The ownership rule ("one driver per run") is documented in the graph-run skill and the README.
 - **Hook latency no longer grows with the number of runs (F3).** The PostToolUse and Stop hooks (and the
   dashboard overview) used to read and validate every run's `state.json` to find the active ones. They now use a
   small self-healing index, `.agents/agflow/runs/.index.json`, so the cost depends on how many runs are *running*,

@@ -146,6 +146,8 @@ flowchart LR
 
 The Stop hook nudges the agent to continue while claimable nodes remain, and gives up if no progress is made.
 
+**One driver per run.** Whoever claims a node owns its report. Don't drive the same run from the MCP loop and from `agflow graph run` at the same time: the engine accepts the first report for a node and rejects a later one (`node 'x' is succeeded, not running`). The headless runner drops its late result, logs a `report_conflict` event (visible in the CLI output, the ledger and the dashboard) and carries on instead of abandoning the run.
+
 The bundled **feature-delivery** graph:
 
 ```mermaid
