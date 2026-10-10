@@ -247,6 +247,8 @@ agflow fix --undo                   revert the last batch
 
 `agflow dashboard` serves a local UI on `127.0.0.1` behind a random token (printed in the URL), and rejects requests with a foreign `Host` header. It has no third-party JavaScript and works offline.
 
+The token is only ever accepted in the `X-Agflow-Token` request header (the page keeps it in `sessionStorage`; the `#token=` in the printed URL is a fragment, which browsers never send to the server). `EventSource` cannot set headers, so the live run view first exchanges the token for a **one-time stream ticket** (`POST /api/stream-ticket`, valid ~30 s, single use, bound to one run, accepted only by that run's `/stream`) and opens the stream with `?ticket=`; a dropped connection simply asks for a new ticket. A token in a query string is rejected on every route, so it can never end up in browser history or proxy logs.
+
 It covers: overview and health, doctor with **Fix issues…** (preview, choose, apply, undo) and a migration preview, skills/agents/rules with toggles and file preview, a **GEMINI.md editor with a 12k-character meter**, MCP servers (catalog add, env checks, toggle, remove), hooks, plugins, profiles (apply), a **graph editor** (live validation and SVG graph view, saved to the workspace), and **runs** (live over SSE, approve/reject human nodes, abort, ledger).
 
 ![Graph editor](docs/images/dashboard-graph.png)

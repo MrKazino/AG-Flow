@@ -475,6 +475,27 @@
           msg, h("div", { style: "margin-top:8px" }, ta))));
   };
 
+  // Live run updates over SSE. EventSource cannot send headers, and the dashboard token must never be put in a URL
+  // (history, proxy and server logs), so each connection first trades the token (header) for a one-time ticket.
+  // A used ticket cannot be replayed and EventSource gives up after a 401, so every reconnect asks for a new one.
+  function liveStream(runId, onData) {
+    let source = null, closed = false, delay = 1000;
+    const retry = () => { if (!closed) setTimeout(connect, delay = Math.min(delay * 2, 15000)); };
+    async function connect() {
+      if (closed) return;
+      try {
+        const t = await api("/stream-ticket", { method: "POST", body: { run_id: runId } });
+        if (closed) return;
+        source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream?ticket=${encodeURIComponent(t.ticket)}`);
+        source.onopen = () => { delay = 1000; };
+        source.onmessage = (ev) => { try { onData(JSON.parse(ev.data)); } catch (_) { /* ignore partial */ } };
+        source.onerror = () => { source.close(); source = null; retry(); };
+      } catch (_) { retry(); }
+    }
+    connect();
+    return { close() { closed = true; if (source) source.close(); } };
+  }
+
   let stream = null;
   pages.runs = async (arg) => {
     if (arg) return runDetail(arg);
@@ -517,8 +538,7 @@
     };
     draw(await api(`/runs/${runId}`));
     if (stream) stream.close();
-    stream = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream?token=${encodeURIComponent(token())}`);
-    stream.onmessage = (ev) => { try { draw(JSON.parse(ev.data)); } catch (_) { /* ignore partial */ } };
+    stream = liveStream(runId, draw);
     return h("div", {},
       h("div", { class: "card" }, head, human, h("div", { style: "margin-top:12px" }, box), legend()),
       h("div", { class: "card" }, h("h2", {}, "Nodes"), nodes),

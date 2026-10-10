@@ -7,10 +7,16 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
 ## [Unreleased] — audit remediation
 
 ### Security
-_(entries are added with each fix)_
+- **The dashboard token no longer travels in a URL (F1).** The live run view used to open its event stream with
+  `?token=<dashboard token>` because `EventSource` cannot send headers, so the bearer token — which grants full
+  dashboard control — was kept in browser history and in every proxy/server log. The page now trades the token
+  (sent as a header) for a **one-time stream ticket** (`POST /api/stream-ticket`; about 30 s, single use, bound to
+  one run, valid only for that run's `/stream`) and opens the stream with `?ticket=`. Reconnects ask for a new
+  ticket. The `#token=` start-up flow is unchanged.
 
 ### Changed
-_(entries are added with each fix)_
+- **`?token=` is no longer accepted on `/api/*` (F1; migration).** Scripts that called the dashboard API with the
+  token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.
 
 ### Fixed
 - **`agflow install` is crash-safe (F6).** Previously the existing plugin directory was deleted before the new one

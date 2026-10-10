@@ -22,7 +22,9 @@ def test_auth_and_host_checks(workspace):
     c = TestClient(create_app(workspace, TOKEN))
     assert c.get("/api/overview").status_code == 401
     assert c.get("/api/overview", headers={"X-Agflow-Token": "wrong"}).status_code == 401
-    assert c.get("/api/overview", params={"token": TOKEN}).status_code == 200
+    # F1: the bearer token is only ever accepted in the header. A token in the URL ends up in browser history and in
+    # every proxy/server log, and whoever holds that URL has full dashboard control.
+    assert c.get("/api/overview", params={"token": TOKEN}).status_code == 401
     assert c.get("/api/overview", headers={"X-Agflow-Token": TOKEN, "Host": "evil.example"}).status_code == 403
     assert c.get("/").status_code == 200  # the static shell itself holds no data
 
@@ -125,3 +127,126 @@ def test_fix_endpoints(client, workspace):
     u = client.post("/api/fix/undo").json()
     assert len(u["fixes"]) == 2 and wf.is_file() and rule.read_text() == "Alpha rule.\n"
     assert client.post("/api/fix/undo").status_code == 400
+
+
+# --- F1: the live stream authenticates with a one-time ticket, never with the long-lived token in the URL -----------
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def live(workspace, clock):
+    """A client with a run in progress, plus helpers for tickets."""
+    g, p = resolve("bugfix", workspace)
+    state = RunStore(workspace).create(g, coerce_inputs(g, {"bug": "x"}), graph_path=str(p))
+    c = TestClient(create_app(workspace, TOKEN, ticket_ttl=30.0, clock=clock, stream_seconds=0.3, stream_poll=0.05))
+    return c, state.run_id
+
+
+def get_ticket(c: TestClient, run_id: str, **kw) -> dict:
+    return c.post("/api/stream-ticket", json={"run_id": run_id}, headers={"X-Agflow-Token": TOKEN}, **kw)
+
+
+def read_first_frame(c: TestClient, run_id: str, ticket: str) -> str:
+    with c.stream("GET", f"/api/runs/{run_id}/stream", params={"ticket": ticket}) as r:
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+        for line in r.iter_lines():
+            if line.startswith("data:"):
+                return line
+    raise AssertionError("no data frame")
+
+
+@pytest.mark.parametrize("path", ["/api/overview", "/api/doctor", "/api/items", "/api/runs", "/api/graphs",
+                                  "/api/mcp", "/api/profiles", "/api/fix/plan", "/api/fix/history", "/api/gemini-md"])
+def test_query_token_is_rejected_on_every_route(workspace, path):
+    c = TestClient(create_app(workspace, TOKEN))
+    assert c.get(path, params={"token": TOKEN}).status_code == 401
+    assert c.get(path, headers={"X-Agflow-Token": TOKEN}).status_code in (200, 404)  # header still works
+
+
+def test_query_token_is_rejected_on_the_stream_route(live):
+    c, run_id = live
+    assert c.get(f"/api/runs/{run_id}/stream", params={"token": TOKEN}).status_code == 401
+
+
+def test_ticket_requires_the_header_token(live):
+    c, run_id = live
+    assert c.post("/api/stream-ticket", json={"run_id": run_id}).status_code == 401
+    assert c.post("/api/stream-ticket", json={"run_id": run_id}, headers={"X-Agflow-Token": "wrong"}).status_code == 401
+    assert c.post("/api/stream-ticket", json={"run_id": run_id}, params={"token": TOKEN}).status_code == 401
+    ok = get_ticket(c, run_id)
+    assert ok.status_code == 200 and ok.json()["expires_in"] == 30.0 and len(ok.json()["ticket"]) >= 20
+
+
+def test_ticket_for_an_unknown_run_is_refused(live):
+    c, _ = live
+    assert get_ticket(c, "no-such-run").status_code == 404
+    auth = {"X-Agflow-Token": TOKEN}
+    assert c.post("/api/stream-ticket", json={"run_id": "../escape"}, headers=auth).status_code == 404
+    assert c.post("/api/stream-ticket", json={}, headers=auth).status_code == 400
+
+
+def test_stream_connects_with_a_ticket(live):
+    c, run_id = live
+    frame = read_first_frame(c, run_id, get_ticket(c, run_id).json()["ticket"])
+    assert run_id in frame
+
+
+def test_ticket_is_single_use(live):
+    c, run_id = live
+    ticket = get_ticket(c, run_id).json()["ticket"]
+    read_first_frame(c, run_id, ticket)
+    assert c.get(f"/api/runs/{run_id}/stream", params={"ticket": ticket}).status_code == 401
+
+
+def test_ticket_expires(live, clock):
+    c, run_id = live
+    ticket = get_ticket(c, run_id).json()["ticket"]
+    clock.now += 31.0
+    assert c.get(f"/api/runs/{run_id}/stream", params={"ticket": ticket}).status_code == 401
+
+
+def test_ticket_is_bound_to_its_run_and_to_the_stream_route(workspace, live):
+    c, run_id = live
+    g, p = resolve("release", workspace)
+    other = RunStore(workspace).create(g, coerce_inputs(g, {"version": "1.0.0"}), graph_path=str(p))
+    ticket = get_ticket(c, run_id).json()["ticket"]
+    assert c.get(f"/api/runs/{other.run_id}/stream", params={"ticket": ticket}).status_code == 401
+    # a ticket is not a credential for anything else
+    again = get_ticket(c, run_id).json()["ticket"]
+    assert c.get("/api/overview", params={"ticket": again}).status_code == 401
+    assert c.get(f"/api/runs/{run_id}", params={"ticket": again}).status_code == 401
+
+
+def test_a_wrong_ticket_is_rejected(live):
+    c, run_id = live
+    assert c.get(f"/api/runs/{run_id}/stream", params={"ticket": "not-a-ticket"}).status_code == 401
+    assert c.get(f"/api/runs/{run_id}/stream", params={"ticket": ""}).status_code == 401
+
+
+def test_ticket_store_is_bounded_and_sweeps_expired_tickets(live, clock):
+    c, run_id = live
+    codes = [get_ticket(c, run_id).status_code for _ in range(300)]
+    assert codes.count(200) == 256 and 429 in codes
+    clock.now += 31.0  # all expired: room again
+    assert get_ticket(c, run_id).status_code == 200
+
+
+def test_the_dashboard_script_never_puts_a_token_in_a_url():
+    from pathlib import Path
+
+    js = (Path(__file__).resolve().parents[1] / "src" / "agflow" / "dashboard" / "static" / "app.js").read_text(
+        encoding="utf-8")
+    assert "?token=" not in js and "&token=" not in js
+    assert "stream-ticket" in js and "ticket=" in js

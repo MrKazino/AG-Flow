@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
+import threading
 import time
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,39 @@ from agflow.validate import summarize, validate_inventory
 STATIC = Path(__file__).parent / "static"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "testserver"}
 TOKEN_HEADER = "x-agflow-token"
+STREAM_PATH = re.compile(r"^/api/runs/([^/]+)/stream$")
+TICKET_TTL_SECONDS = 30.0
+TICKET_MAX = 256
+
+
+class TicketStore:
+    """Single-use, short-lived credentials for the live run stream.
+
+    ``EventSource`` cannot send headers, and the long-lived dashboard token must never travel in a URL (browser
+    history, proxy and server logs). The page therefore POSTs for a ticket (authenticated by the header), then
+    opens the stream with ``?ticket=``. A ticket works once, for one run, for ``ttl`` seconds, and for nothing else.
+    """
+
+    def __init__(self, ttl: float, clock: Callable[[], float]):
+        self.ttl, self.clock = ttl, clock
+        self._tickets: dict[str, tuple[float, str]] = {}  # ticket -> (expires_at, run_id)
+        self._lock = threading.Lock()
+
+    def issue(self, run_id: str) -> str | None:
+        """A new ticket, or ``None`` when too many unexpired ones are outstanding."""
+        with self._lock:
+            now = self.clock()
+            self._tickets = {t: v for t, v in self._tickets.items() if v[0] > now}
+            if len(self._tickets) >= TICKET_MAX:
+                return None
+            ticket = secrets.token_urlsafe(16)
+            self._tickets[ticket] = (now + self.ttl, run_id)
+            return ticket
+
+    def redeem(self, ticket: str, run_id: str) -> bool:
+        with self._lock:
+            entry = self._tickets.pop(ticket, None)  # consumed whether or not it turns out to be valid
+        return entry is not None and entry[1] == run_id and entry[0] > self.clock()
 
 
 def graph_layout(graph: Any) -> dict[str, Any]:
@@ -54,19 +90,32 @@ def graph_layout(graph: Any) -> dict[str, Any]:
     }
 
 
-def create_app(workspace: Path, token: str) -> FastAPI:
+def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SECONDS,
+               clock: Callable[[], float] = time.monotonic, stream_seconds: float = 3600.0,
+               stream_poll: float = 1.0) -> FastAPI:
+    """``ticket_ttl``/``clock`` make stream-ticket expiry testable; ``stream_seconds``/``stream_poll`` bound how long
+    one live stream lasts and how often it checks the run (tests shorten them so a stream ends by itself)."""
     app = FastAPI(title="agflow dashboard", version=__version__, docs_url=None, redoc_url=None)
     ws = workspace.resolve()
+    tickets = TicketStore(ticket_ttl, clock)
 
     @app.middleware("http")
     async def guard(request: Request, call_next: Any) -> Any:
         host = (request.headers.get("host") or "").rsplit(":", 1)[0]
         if host not in ALLOWED_HOSTS:
             return JSONResponse({"detail": "forbidden host"}, status_code=403)
-        if request.url.path.startswith("/api/"):
-            given = request.headers.get(TOKEN_HEADER) or request.query_params.get("token", "")
-            if not secrets.compare_digest(given, token):
-                return JSONResponse({"detail": "missing or invalid token"}, status_code=401)
+        path = request.url.path
+        if path.startswith("/api/"):
+            stream = STREAM_PATH.match(path)
+            ticket = request.query_params.get("ticket")
+            if stream and ticket is not None:
+                # the only route that accepts a URL credential, and only a one-time ticket for exactly this run
+                if not tickets.redeem(ticket, stream.group(1)):
+                    return JSONResponse({"detail": "missing, expired or already used stream ticket"}, status_code=401)
+            else:
+                given = request.headers.get(TOKEN_HEADER, "")
+                if not secrets.compare_digest(given.encode("utf-8"), token.encode("utf-8")):
+                    return JSONResponse({"detail": "missing or invalid token"}, status_code=401)
         return await call_next(request)
 
     def inventory() -> Inventory:
@@ -322,6 +371,19 @@ def create_app(workspace: Path, token: str) -> FastAPI:
     def run_detail(run_id: str) -> dict[str, Any]:
         return _run_detail(run_id)
 
+    @app.post("/api/stream-ticket")
+    def stream_ticket(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """Exchange the (header) token for a one-time ticket to open the live stream of one run."""
+        run_id = body.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise HTTPException(400, "run_id must be a non-empty string")
+        if not RunStore(ws).exists(run_id):
+            raise HTTPException(404, f"unknown run {run_id}")
+        ticket = tickets.issue(run_id)
+        if ticket is None:
+            raise HTTPException(429, "too many stream tickets outstanding; try again in a moment")
+        return {"ticket": ticket, "expires_in": tickets.ttl}
+
     @app.get("/api/runs/{run_id}/stream")
     async def run_stream(run_id: str, request: Request) -> StreamingResponse:
         store = RunStore(ws)
@@ -331,7 +393,7 @@ def create_app(workspace: Path, token: str) -> FastAPI:
 
         async def events() -> Any:
             last = None
-            deadline = time.time() + 3600
+            deadline = time.time() + stream_seconds
             while time.time() < deadline and not await request.is_disconnected():
                 mtime = state_file.stat().st_mtime if state_file.exists() else None
                 if mtime != last:
@@ -339,7 +401,7 @@ def create_app(workspace: Path, token: str) -> FastAPI:
                     yield f"data: {json.dumps(_run_detail(run_id), default=str)}\n\n"
                 else:
                     yield ": keep-alive\n\n"
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(stream_poll)
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store"})
