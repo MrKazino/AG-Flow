@@ -1,0 +1,36 @@
+F1   CONFIRMED       server_accepts_query_token=True client_sends_it=True
+F2   CONFIRMED       run_graph raised EngineError(node 'reproduce' is succeeded, not running; call graph_next to claim it first); run status=running
+F3   CONFIRMED       post_tool_use ms by run count: {1: 5.2, 50: 226.7, 200: 882.6}
+F5   CONFIRMED       {'bad-json': 'JSONDecodeError', 'bad-kind': 'ValueError', 'missing-key': 'KeyError'}
+F5b  CONFIRMED       sibling (same root cause): {'corrupt plugin.json': 'JSONDecodeError'}
+F6   CONFIRMED       plugin dir removed at char 7032, manifest written at char 8493 (manifest last)
+F7   CONFIRMED       after crash: skill dir gone=True parked copy exists=True visible in inventory=False
+F8   CONFIRMED       os=nt: FileExistsError(C:\Users\KOOSHA~1\AppData\Local\Temp\agflow-verify-shno6tl1\f8\.agents\workflows\ship.md)
+F9   CONFIRMED       file deleted between discovery and validation -> {'gemini_md': 'FileNotFoundError', 'mcp_file': 'FileNotFoundError', 'hooks_file': 'FileNotFoundError', 'plugin_manifest': 'FileNotFoundError', 'rule': 'no crash', 'empty plugin.json': ['plugin.json'], 'empty mcp': ['mcp.schema']}
+F10  NOT-REPRODUCED  legacy fixes applied=2 (tree changed=True); tree identical after undo=True; diff=[]
+F11  CONFIRMED       ledger line: {"ts": 1791634966.2203078, "event": "run_started", "graph": "secretish", "inputs": {"api_key": "sk-live-SECRET123"}}
+F14  CONFIRMED       fsync absent=True; symlink behaviour INCONCLUSIVE locally ([WinError 1314] A required privilege is not held by the client: 'C:\\Users\\KOOSHA~1\\AppData\\Local\\Temp\\agflow-verify-shno6tl1\\f14\\real.txt' -> 'C:\\Users\\KOOSHA~1\\AppData\\Local\\Temp\\agflow-verify-shno6tl1\\f14\\link.txt'); os.replace(tmp, link) replaces the link by definition
+F15  CONFIRMED       both mapped to mcp_config.json; content now 'from b' (first backup lost)
+F15b CONFIRMED       two different 'plugin' dirs merged into one backup: ['one.txt', 'two.txt']
+F16  CONFIRMED       {'mcpServers=list': 'ValueError', 'mcpServers=string': 'ValueError', 'mcpServers=list add': 'TypeError', 'scalar entry toggle': 'TypeError', 'invalid json': 'JSONDecodeError'}
+F17  CONFIRMED       store.list() calls in mcp_server.py=2; slice applied after full parse
+F18  CONFIRMED       insert sites=2, eviction sites=0
+F19  CONFIRMED       Inventory.discover calls inside one apply()=2 (+1 when the caller already built a plan)
+F20  CONFIRMED       AbortController/sequence guards in app.js=0
+F21  CONFIRMED       SdkBackend.run exercised in tests/test_sdk_backend.py=False
+F22  NOT-REPRODUCED  {'fence-inside-string': 'succeeded', 'top-level-array': 'failed', 'nested-object': 'succeeded'}
+F23  CONFIRMED       TypeError: unsupported operand type(s) for *: 'NoneType' and 'int' (only reachable with a hand-built card: engine.build_card always sets an int)
+F24  CONFIRMED       duplicate depends_on accepted=True; 'items' input accepted, '{{ inputs.items }}' renders as: 'v=<built-in method items of dict object at 0x000001F5D671E1C'
+F25  CONFIRMED       innerHTML present=True; callers passing html:=0
+F26  CONFIRMED       SDK sorts deny-before-allow regardless of list order (['d', 'allow_all'] == ['d', 'allow_all']); precedence is documented in the SDK but not locked in agflow (no test, no comment)
+F27  CONFIRMED       read_text calls for one always_on rule across discover+validate=4
+F28  CONFIRMED       pytest-cov in pyproject=False; --cov in CI=False
+F29  CONFIRMED       fixes.py uses install privates ['_BLOCK_RE', '_manifest_path', '_master_rule', '_plugin_target']; /fix/undo called from 2 places in app.js; dark palette blocks in css=5
+F30  CONFIRMED       GEMINI.md=['graph_report(run_id, node_id, status, summary, artifacts)', 'graph_runs(only_active=true)'] | orchestrator.md=['graph_report(run_id, node_id, status, summary, artifacts, followups)'] | graph-run=['graph_report(run_id, node_id=card.node_id, status, summary, artifacts, followups)', 'graph_runs(workspace, only_active=true)']
+F31  CONFIRMED       dangerous command in an unrecognised payload shape -> stdout={}, debug log written=False, no ledger/dashboard signal
+F32  CONFIRMED       hardcoded platform-vocabulary literals by file: {'validate.py': 7, 'backends.py': 13, 'fixes.py': 3, 'migrate.py': 1}
+F33  DRIFTED         existing test_sdk_backend uses the REAL SDK when installed (not stubs)=True; but no signature snapshot, no live run, nightly schedule present=False
+F34  CONFIRMED       no marker file written inside parked items; no doctor check for parked items in scan scope
+F35  CONFIRMED       sync reads/writes Gemini CLI settings.json with no structure/version probe
+
+TMP: C:\Users\KOOSHA~1\AppData\Local\Temp\agflow-verify-shno6tl1

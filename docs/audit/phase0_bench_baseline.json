@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "1": {
+      "post_tool_use_inprocess_ms": 2.2,
+      "post_tool_use_subprocess_ms": 554.7
+    },
+    "50": {
+      "post_tool_use_inprocess_ms": 47.2,
+      "post_tool_use_subprocess_ms": 606.3
+    },
+    "500": {
+      "post_tool_use_inprocess_ms": 455.4,
+      "post_tool_use_subprocess_ms": 1010.7
+    }
+  },
+  "doctor": {
+    "items": 350,
+    "doctor_ms": 63365.6
+  }
+}
