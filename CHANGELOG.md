@@ -27,6 +27,11 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
   token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.
 
 ### Fixed
+- **`agflow doctor` no longer crashes on a file that disappears or cannot be read (F9).** The GEMINI.md, MCP
+  config, hooks and plugin-manifest validators (and the always-on rule size count) read files without a guard, so
+  a file deleted between discovery and validation, or one that was not valid UTF-8, aborted the whole doctor run.
+  Every validator now reports an `unreadable` error and carries on. An empty JSON config is treated the same way
+  by all three JSON validators.
 - **Backups of same-named files no longer overwrite each other (F15).** Files outside your home directory were
   backed up under their bare file name, so two `mcp_config.json` from different projects shared one backup and
   the first was lost (same-named directories were merged). They are now stored under a per-path folder, and

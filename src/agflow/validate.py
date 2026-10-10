@@ -48,11 +48,31 @@ def _info(code: str, msg: str, path: Path | None = None) -> Issue:
     return Issue(Level.INFO, code, msg, path)
 
 
-def _load(path: Path) -> tuple[dict[str, Any] | None, str, list[Issue]]:
+def _read_text(path: Path) -> tuple[str | None, list[Issue]]:
+    """The one way validators read a file. A file that vanished between discovery and validation, that cannot be
+    read, or that is not UTF-8 becomes an ``unreadable`` issue -- never an exception that aborts the whole doctor."""
     try:
-        text = path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8"), []
     except (OSError, UnicodeDecodeError) as exc:
-        return None, "", [_err("unreadable", str(exc), path)]
+        return None, [_err("unreadable", str(exc), path)]
+
+
+def _load_json(path: Path, code: str) -> tuple[Any, list[Issue]]:
+    """Parse a JSON file; an empty (or whitespace-only) file counts as ``{}`` for every JSON validator alike."""
+    text, issues = _read_text(path)
+    if text is None:
+        return None, issues
+    try:
+        return json.loads(text.strip() or "{}"), []
+    except json.JSONDecodeError as exc:
+        return None, [_err(code, f"invalid JSON: {exc}", path)]
+
+
+def _load(path: Path, text: str | None = None) -> tuple[dict[str, Any] | None, str, list[Issue]]:
+    if text is None:
+        text, issues = _read_text(path)
+        if text is None:
+            return None, "", issues
     if not frontmatter.has_frontmatter(text):
         return None, text, [_err("frontmatter.missing", "file must start with YAML frontmatter (---)", path)]
     try:
@@ -66,7 +86,9 @@ def _load(path: Path) -> tuple[dict[str, Any] | None, str, list[Issue]]:
 
 
 def validate_gemini_md(path: Path) -> list[Issue]:
-    text = path.read_text(encoding="utf-8")
+    text, issues = _read_text(path)
+    if text is None:
+        return issues
     n = len(text)
     limit = paths.GEMINI_MD_CHAR_LIMIT
     if n > limit:
@@ -81,7 +103,10 @@ def validate_gemini_md(path: Path) -> list[Issue]:
 
 
 def validate_rule(path: Path) -> list[Issue]:
-    meta, body, issues = _load(path)
+    text, issues = _read_text(path)
+    if text is None:
+        return issues
+    meta, body, issues = _load(path, text)
     if meta is None:
         return issues
     trigger = meta.get("trigger")
@@ -91,7 +116,7 @@ def validate_rule(path: Path) -> list[Issue]:
         issues.append(_err("rule.globs", "trigger: glob requires a non-empty 'globs' value", path))
     if trigger == "model_decision" and not str(meta.get("description", "")).strip():
         issues.append(_warn("rule.description", "model_decision rules need a description to be picked", path))
-    size = len(path.read_text(encoding="utf-8"))
+    size = len(text)
     if size > paths.GEMINI_MD_CHAR_LIMIT:
         issues.append(_err("rule.too_long", f"{size} chars exceeds the {paths.GEMINI_MD_CHAR_LIMIT}-char cap", path))
     if not body.strip():
@@ -212,11 +237,10 @@ def validate_agent(path: Path, known_agents: set[str] | None = None) -> list[Iss
 
 
 def validate_mcp_file(path: Path) -> list[Issue]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8") or "{}")
-    except json.JSONDecodeError as exc:
-        return [_err("mcp.json", f"invalid JSON: {exc}", path)]
-    issues: list[Issue] = []
+    data, issues = _load_json(path, "mcp.json")
+    if issues:
+        return issues
+    issues = []
     servers = data.get("mcpServers") if isinstance(data, dict) else None
     if not isinstance(servers, dict):
         return [_err("mcp.schema", "top-level 'mcpServers' object is required", path)]
@@ -241,10 +265,9 @@ def validate_mcp_file(path: Path) -> list[Issue]:
 
 
 def validate_hooks_file(path: Path) -> list[Issue]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8") or "{}")
-    except json.JSONDecodeError as exc:
-        return [_err("hooks.json", f"invalid JSON: {exc}", path)]
+    data, issues = _load_json(path, "hooks.json")
+    if issues:
+        return issues
     hooks = data.get("hooks") if isinstance(data, dict) else None
     if not isinstance(hooks, dict):
         return [_err("hooks.schema", "top-level 'hooks' object is required", path)]
@@ -267,11 +290,10 @@ def validate_hooks_file(path: Path) -> list[Issue]:
 
 
 def validate_plugin_manifest(path: Path) -> list[Issue]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        return [_err("plugin.json", f"invalid JSON: {exc}", path)]
-    issues: list[Issue] = []
+    data, issues = _load_json(path, "plugin.json")
+    if issues:
+        return issues
+    issues = []
     name = data.get("name") if isinstance(data, dict) else None
     if not name or not NAME_RE.match(str(name)):
         issues.append(_err("plugin.name", "plugin.json needs a lowercase-hyphenated 'name'", path))
@@ -303,6 +325,8 @@ def validate_inventory(inv: Inventory) -> list[Issue]:
         if not item.enabled:
             continue
         if item.kind == Kind.GEMINI_MD:
+            if item.meta.get("unreadable"):
+                continue  # discovery already reported it as a `load` error
             found = validate_gemini_md(item.path)
             issues += found
             always_on_chars[_scope_group(item)] += item.meta.get("chars", 0)
@@ -311,7 +335,9 @@ def validate_inventory(inv: Inventory) -> list[Issue]:
         elif item.kind == Kind.RULE:
             issues += validate_rule(item.path)
             if item.meta.get("trigger") == "always_on":
-                always_on_chars[_scope_group(item)] += len(item.path.read_text(encoding="utf-8"))
+                text, read_issues = _read_text(item.path)
+                issues += read_issues
+                always_on_chars[_scope_group(item)] += len(text or "")
         elif item.kind == Kind.SKILL:
             issues += validate_skill(item.path)
         elif item.kind == Kind.AGENT:
@@ -373,14 +399,14 @@ def legacy_config(lay: Any) -> list[str]:
     if lay.mcp_file and lay.mcp_file.is_file():
         try:
             legacy = set(json.loads(lay.mcp_file.read_text(encoding="utf-8") or "{}").get("mcpServers") or {})
-        except (json.JSONDecodeError, AttributeError, OSError):
+        except (ValueError, AttributeError, OSError):
             legacy = set()
         current_file = paths.global_layout().mcp_file
         current: set[str] = set()
         if current_file and current_file.is_file():
             try:
                 current = set(json.loads(current_file.read_text(encoding="utf-8") or "{}").get("mcpServers") or {})
-            except (json.JSONDecodeError, AttributeError, OSError):
+            except (ValueError, AttributeError, OSError):
                 current = set()
         missing = sorted(legacy - current)
         if missing:

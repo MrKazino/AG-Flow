@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from agflow import paths
 from agflow.inventory import Inventory
 from agflow.models import Kind, Level
@@ -160,3 +162,71 @@ def test_oversized_gemini_md_is_reported_once(home, workspace):
     for n in range(3):  # other always-on rules that are too big on their own still warn
         write(rules / "rules" / f"r{n}.md", "---\ntrigger: always_on\n---\n" + "y" * 11_000)
     assert "context.always_on" in [i.code for i in validate_inventory(Inventory.discover(workspace))]
+
+
+# --- F9: no validator may crash because a file is missing, unreadable or binary ---------------------
+
+
+def _make_bad(tmp_path, state):
+    p = tmp_path / "f.md"
+    if state == "binary":
+        p.write_bytes(b"\xff\xfe\x00\x80 not utf-8")
+    elif state == "empty":
+        p.write_text("", encoding="utf-8")
+    elif state == "directory":
+        p.mkdir()
+    return p  # "missing": nothing created
+
+
+@pytest.mark.parametrize("state", ["missing", "binary", "directory", "empty"])
+@pytest.mark.parametrize("name", ["validate_gemini_md", "validate_rule", "validate_skill", "validate_agent",
+                                  "validate_mcp_file", "validate_hooks_file", "validate_plugin_manifest"])
+def test_validators_never_crash_on_missing_binary_or_unreadable_files(tmp_path, name, state):
+    import agflow.validate as v
+
+    result = getattr(v, name)(_make_bad(tmp_path, state))  # used to raise FileNotFoundError / UnicodeDecodeError
+    assert isinstance(result, list)
+    if state != "empty":
+        assert [i for i in result if i.code == "unreadable"], f"{name} must say it could not read the file"
+
+
+@pytest.mark.parametrize("name", ["validate_mcp_file", "validate_hooks_file", "validate_plugin_manifest"])
+def test_empty_json_files_are_treated_alike(tmp_path, name):
+    import agflow.validate as v
+
+    p = tmp_path / "x.json"
+    p.write_text("  \n", encoding="utf-8")
+    codes_ = {i.code for i in getattr(v, name)(p)}
+    assert not codes_ & {"mcp.json", "hooks.json", "plugin.json"}, "an empty file is 'no content', not invalid JSON"
+
+
+def test_inventory_validation_survives_files_deleted_after_discovery(tmp_path):
+    from agflow.inventory import Inventory
+    from agflow.validate import validate_inventory
+
+    ws = tmp_path / "ws"
+    (ws / ".git").mkdir(parents=True)
+    rule = write(ws / ".agents" / "rules" / "r.md", "---\ntrigger: always_on\ndescription: d\n---\nbody\n")
+    mcp = write(ws / ".agents" / "mcp_config.json", '{"mcpServers": {"x": {"command": "echo"}}}')
+    plugin = ws / ".agents" / "plugins" / "p"
+    write(plugin / "plugin.json", '{"name": "p", "version": "1", "description": "d"}')
+    gemini = write(plugin / "GEMINI.md", "# hi\n")
+    inv = Inventory.discover(ws, include_global=False, include_legacy=False)
+    for f in (rule, mcp, gemini):
+        f.unlink()  # the race: the file is there at discovery and gone at validation
+    issues = validate_inventory(inv)  # must not raise
+    assert {"unreadable"} <= {i.code for i in issues}
+
+
+def test_an_unreadable_gemini_md_is_reported_once(tmp_path):
+    from agflow.inventory import Inventory
+    from agflow.validate import validate_inventory
+
+    ws = tmp_path / "ws"
+    (ws / ".git").mkdir(parents=True)
+    plugin = ws / ".agents" / "plugins" / "p"
+    write(plugin / "plugin.json", '{"name": "p", "version": "1", "description": "d"}')
+    (plugin / "GEMINI.md").write_bytes(b"\xff\xfe\x00\x80")
+    issues = [i for i in validate_inventory(Inventory.discover(ws, include_global=False, include_legacy=False))
+              if i.path == plugin / "GEMINI.md"]
+    assert len(issues) == 1, [str(i) for i in issues]

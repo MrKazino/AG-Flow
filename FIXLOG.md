@@ -124,9 +124,13 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Evidence:** Windows (where the old code crashed) and WSL (where it silently overwrote) both green for the three test files; `ruff` clean.
 
 ### F9 — unguarded reads crash doctor
-- **Status:** pending · **Location (verified):** `validate.py:69,216,245,271` (+`:94`,`:314`) · **Doctor rule:** existing `unreadable`
-- **Phase-0 note:** empty `plugin.json` is *not* a crash (yields error `plugin.json`); consistency fix only.
-- **Change / files / tests / evidence:** pending.
+- **Status:** fixed · **Location (verified):** `validate.py:69,216,245,271` (+`:94`,`:314`) · **Doctor rule:** existing `unreadable` (ERROR) now covers every validator
+- **Phase-0 evidence:** deleting the file between discovery and validation → `FileNotFoundError` in `validate_gemini_md`, `validate_mcp_file`, `validate_hooks_file`, `validate_plugin_manifest`. An empty `plugin.json` was *not* a crash (error `plugin.json`); only an inconsistency with mcp/hooks.
+- **Root cause:** reading was not centralised — `_load` guarded, six other call sites did not.
+- **Change:** `_read_text(path)` is the one way validators read a file (missing / unreadable / not UTF-8 → an `unreadable` ERROR, processing continues); `_load_json(path, code)` parses JSON on top of it and treats an empty or whitespace-only file as `{}` for **all three** JSON validators alike; `_load` accepts pre-read text so `validate_rule` reads its file once (the second read at `:94` is gone) and always-on counting in `validate_inventory` goes through `_read_text` (`:314`); `legacy_config` also tolerates non-UTF-8 files. Discovery marks an unreadable `GEMINI.md` (`meta.unreadable`) and `validate_inventory` skips it, so it is reported once (as the `load` error from F5) instead of twice.
+- **Files:** `src/agflow/validate.py`, `src/agflow/inventory.py`, `CHANGELOG.md`, `tests/test_validate.py`.
+- **Tests added (17 failed on `bf8c178`):** 7 validators × {missing, binary, directory, empty} never crash and say `unreadable` (28 parametrized cases); empty JSON files are treated alike; whole-inventory validation survives files deleted after discovery; an unreadable `GEMINI.md` is reported exactly once.
+- **Note for F27:** rule files are still read twice (discovery + validation); F27 reduces that.
 
 ### F10 — legacy migration backup coverage
 - **Status:** **n/a — not reproduced** · **Location (verified):** `fixes.py:608–618` · **Doctor rule:** n/a
@@ -163,7 +167,7 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Change:** `backup()` places anything outside the anchor at `_external/<sha1(resolved path)[:12]>/<name>`; no more `dirs_exist_ok`; if the same path was already backed up into the same root, the first (pristine) copy is kept and returned. Anchor-relative layout is unchanged. Manifests store absolute backup paths, so manifests written by 0.2.0 still uninstall (tested).
 - **Files:** `src/agflow/fsutil.py`, `tests/test_fsutil.py`, `tests/test_install_atomic.py`.
 - **Tests added (6):** same-name files from different dirs both restorable; same-name dirs not merged; same path twice keeps the pristine copy; anchor-relative layout unchanged; missing path returns None; a 0.2.0-style manifest still uninstalls.
-- **Evidence:** Windows 287 passed / 7 skipped; `ruff` clean. **WSL (POSIX) run not done for this commit** (usage limit reached) — to be run with the Phase 2 gate.
+- **Evidence:** Windows 287 passed / 7 skipped; WSL (POSIX) 290 passed / 4 skipped; `ruff` clean.
 
 ### F16 — `mcpServers` type validation
 - **Status:** pending · **Location (verified):** `mcp_registry.py:45–50,96–104` · **Doctor rule:** none (CLI/API error path)

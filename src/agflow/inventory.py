@@ -174,12 +174,14 @@ class Inventory:
                 meta={"version": manifest.get("version", "")},
             )
         if lay.gemini_md and lay.gemini_md.is_file():
+            unreadable = False
             try:
                 chars = len(lay.gemini_md.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError) as exc:
                 self.load_errors.append((lay.gemini_md, f"unreadable: {exc}"))
-                chars = 0
-            self._add(Kind.GEMINI_MD, "GEMINI.md", lay.gemini_md, scope, meta={"chars": chars})
+                chars, unreadable = 0, True
+            self._add(Kind.GEMINI_MD, "GEMINI.md", lay.gemini_md, scope,
+                      meta={"chars": chars, **({"unreadable": True} if unreadable else {})})
         for p in iter_markdown(lay.rules_dir):
             meta, _, _ = _meta_of(p)  # parse errors are reported by validate.validate_rule
             self._add(Kind.RULE, p.stem, p, scope, description=str(meta.get("description", "")),
