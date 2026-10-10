@@ -163,7 +163,7 @@ def build_server() -> MCPServer:
         """Status of a run (or the latest run in the workspace when run_id is omitted)."""
         store = _store(workspace, run_id)
         try:
-            state = store.load(run_id) if run_id else (store.list() or [None])[0]
+            state = store.load(run_id) if run_id else (store.list(limit=1) or [None])[0]
         except RunNotFound:
             state = None
         if state is None:
@@ -177,10 +177,11 @@ def build_server() -> MCPServer:
     def graph_runs(workspace: str | None = None, only_active: bool = False) -> dict[str, Any]:
         """List runs in the workspace (newest first)."""
         store = _store(workspace)
-        runs = store.active() if only_active else store.list()
+        # one page of 50 costs 50 reads however many runs exist (the status index picks the newest / the running ones)
+        runs = store.active()[:50] if only_active else store.list(limit=50)
         return {"ok": True, "workspace": str(store.workspace), "runs": [
             {"run_id": r.run_id, "graph_id": r.graph_id, "status": r.status, "counts": engine.counts(r),
-             "created_at": r.created_at} for r in runs[:50]]}
+             "created_at": r.created_at} for r in runs]}
 
     @server.tool()
     def graph_resume(run_id: str, workspace: str | None = None) -> dict[str, Any]:

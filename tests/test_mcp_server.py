@@ -120,3 +120,36 @@ async def test_stdio_transport(ws_with_graph, home):
     async with Client(params) as c:
         res = await call(c, "graph_list", workspace=str(ws_with_graph))
         assert "mini" in {g["id"] for g in res["graphs"]}
+
+
+# --- F17: polling the run list must not parse every run -------------------------------------------------------------
+
+
+async def test_graph_runs_and_status_do_not_parse_every_run(workspace, monkeypatch):
+    from agflow.graph.store import RunStore
+    from tests.test_store_index import count_validations, make_run
+
+    store = RunStore(workspace)
+    for n in range(60):
+        make_run(store, "succeeded", n)
+    running = make_run(store, "running", 100)
+    store.active()  # warm the index (the first call after an upgrade indexes what it has not seen)
+    ws = str(workspace)
+    async with Client(build_server()) as c:
+        with monkeypatch.context() as mp:
+            calls = count_validations(mp)
+            runs = await call(c, "graph_runs", workspace=ws)
+            assert len(runs["runs"]) == 50 and runs["runs"][0]["run_id"] == running.run_id
+            assert calls[0] == 50, "61 runs on disk: a page of 50 may cost 50 reads, not 61"
+            calls[0] = 0
+            active = await call(c, "graph_runs", workspace=ws, only_active=True)
+            assert [r["run_id"] for r in active["runs"]] == [running.run_id] and calls[0] == 1
+            calls[0] = 0
+            latest = await call(c, "graph_status", workspace=ws)
+            assert latest["run_id"] == running.run_id and calls[0] == 1
+
+
+async def test_graph_status_without_a_run_id_still_reports_no_runs(workspace):
+    async with Client(build_server()) as c:
+        result = await call(c, "graph_status", workspace=str(workspace))
+    assert result["ok"] is False and "no runs" in result["error"]

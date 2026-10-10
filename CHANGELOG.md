@@ -27,6 +27,9 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
   token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.
 
 ### Fixed
+- **The MCP server no longer parses every run on each status poll (F17).** `graph_status` (without a run id) and
+  `graph_runs` validated up to 500 `state.json` files per call before keeping the newest 1 or 50, which added
+  needless CPU and disk I/O to the polling loop of a long-lived server. They now read only the runs they return.
 - **A malformed `mcp_config.json` gives a readable error instead of a crash (F16).** If `mcpServers` was a list or
   a string, or a server entry was not an object, `agflow mcp add/remove/enable/disable`, the dashboard's MCP page
   and `agflow profile apply` failed with an internal `TypeError`/`AttributeError`. They now stop with a message

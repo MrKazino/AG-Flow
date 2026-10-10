@@ -182,8 +182,11 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Tests added (30; 24 fail on `bf8c178`):** 7 malformed shapes × {list, add, remove, toggle} each raise `McpError` naming the file and leave the file byte-identical; dashboard add/toggle/remove answer 400; applying a profile over a broken config raises `ToggleError`.
 
 ### F17 — `graph_status`/`graph_runs` full parse
-- **Status:** pending · **Location (verified):** `mcp_server.py:166,180` · **Doctor rule:** none
-- **Change / files / tests / evidence:** pending.
+- **Status:** fixed · **Location (verified):** `mcp_server.py:166,180` · **Doctor rule:** none
+- **Root cause:** both tools called `store.list()`, which reads and validates every `state.json` (up to the 500-run cap) and only then sliced `[:50]` / took `[0]`; the documented orchestration loop polls `graph_status` regularly.
+- **Change (depends on F3):** `graph_status` without a `run_id` uses `store.list(limit=1)`; `graph_runs` uses `store.list(limit=50)` (the status index picks the newest candidates; only those are parsed) or `store.active()[:50]` for `only_active`. Responses are unchanged in shape and order.
+- **Files:** `src/agflow/mcp_server.py`, `CHANGELOG.md`, `tests/test_mcp_server.py`.
+- **Tests added (2; 1 fails on `bf8c178`):** with 60 finished + 1 running runs a `graph_runs` page parses exactly 50 (old: 61), `only_active` parses 1, `graph_status` with no id parses 1; `graph_status` with no runs still says so.
 
 ### F18 — `_workspaces` leak
 - **Status:** pending · **Location (verified):** `mcp_server.py:35,105,198` · **Doctor rule:** none
