@@ -250,3 +250,21 @@ def test_install_then_uninstall_leaves_the_tree_identical_workspace(home, worksp
     install("workspace", workspace, profile=profile)
     uninstall("workspace", workspace)
     assert tree(workspace, state) == before_ws and tree(home, agflow_state(home)) == before_home
+
+
+def test_a_manifest_written_by_an_older_agflow_still_uninstalls(lived_in):
+    """F15 changed where new backups go; manifests record absolute backup paths, so old ones must keep working."""
+    target = paths.global_layout().plugins_dir / "agflow"
+    saved = paths.backups_dir() / "20260101-000000-000" / ".gemini" / "config" / "plugins" / "agflow"
+    write(saved / "old.txt", "old")
+    write(saved / "plugin.json", json.dumps({"name": "agflow", "version": "0.0.1", "description": "older copy"}))
+    for f in list(target.iterdir()):
+        f.unlink()
+    write(target / "plugin.json", json.dumps({"name": "agflow", "version": "9", "description": "installed by 0.2.0"}))
+    manifest = {"scope": "global", "created": [], "modified": {str(target): str(saved)}, "managed_blocks": [],
+                "source": "x", "profile": None, "command": ["agflow"]}
+    inst._manifest_path("global", None).parent.mkdir(parents=True, exist_ok=True)
+    inst._manifest_path("global", None).write_text(json.dumps(manifest), encoding="utf-8")
+    uninstall("global")
+    assert (target / "old.txt").read_text() == "old"
+    assert json.loads((target / "plugin.json").read_text())["version"] == "0.0.1"

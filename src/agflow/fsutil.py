@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -120,17 +121,26 @@ def timestamp() -> str:
 
 
 def backup(path: Path, backup_root: Path, anchor: Path) -> Path | None:
-    """Copy ``path`` (file or dir) into ``backup_root`` preserving its location relative to ``anchor``."""
+    """Copy ``path`` (file or dir) into ``backup_root``; returns the copy, or ``None`` if ``path`` does not exist.
+
+    Under ``anchor`` the copy keeps the path's location relative to it. Anything outside the anchor goes to
+    ``_external/<hash of its full path>/<name>``: keyed by the bare name, two same-named files from different
+    places (two ``mcp_config.json``) shared one destination and the later copy silently replaced the earlier one
+    (directories were merged). If ``path`` was already backed up into this root, the first (pristine) copy is kept.
+    """
     if not path.exists():
         return None
+    resolved = path.resolve()
     try:
-        rel = path.resolve().relative_to(anchor.resolve())
+        rel = resolved.relative_to(anchor.resolve())
     except ValueError:
-        rel = Path(path.name)
+        rel = Path("_external") / hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:12] / path.name
     dest = backup_root / rel
+    if dest.exists() or dest.is_symlink():
+        return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     if path.is_dir():
-        shutil.copytree(path, dest, dirs_exist_ok=True, symlinks=True)
+        shutil.copytree(path, dest, symlinks=True)
     else:
         shutil.copy2(path, dest)
     return dest

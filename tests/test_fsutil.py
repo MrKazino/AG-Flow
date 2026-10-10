@@ -134,3 +134,59 @@ def test_unique_sibling_treats_a_dangling_symlink_as_taken(tmp_path: Path, requi
     f.write_text("wf", encoding="utf-8")
     os.symlink(tmp_path / "nowhere", tmp_path / "ship.md.bak")  # exists() is False for a dangling link
     assert fsutil.unique_sibling(f) == tmp_path / "ship.md.bak2"
+
+
+# --- F15: backups of same-named files from different places must not collide ------------------------------------------
+
+
+@pytest.fixture
+def places(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    anchor, root = tmp_path / "home", tmp_path / "backups"
+    a, b = tmp_path / "project-a", tmp_path / "project-b"  # both OUTSIDE the anchor, like two workspaces
+    for d in (anchor, a, b):
+        d.mkdir(exist_ok=True)  # tmp_path/"home" already exists (autouse sandbox fixture)
+    return anchor, root, a, b
+
+
+def test_same_name_files_from_different_directories_are_both_restorable(places):
+    anchor, root, a, b = places
+    (a / "mcp_config.json").write_text("from a", encoding="utf-8")
+    (b / "mcp_config.json").write_text("from b", encoding="utf-8")
+    first = fsutil.backup(a / "mcp_config.json", root, anchor)
+    second = fsutil.backup(b / "mcp_config.json", root, anchor)
+    assert first != second
+    assert first.read_text(encoding="utf-8") == "from a" and second.read_text(encoding="utf-8") == "from b"
+    assert first.name == second.name == "mcp_config.json"  # still recognisable
+
+
+def test_same_name_directories_are_not_merged(places):
+    anchor, root, a, b = places
+    for d, marker in ((a, "one.txt"), (b, "two.txt")):
+        (d / "plugin").mkdir()
+        (d / "plugin" / marker).write_text(marker, encoding="utf-8")
+    first, second = fsutil.backup(a / "plugin", root, anchor), fsutil.backup(b / "plugin", root, anchor)
+    assert sorted(p.name for p in first.iterdir()) == ["one.txt"]
+    assert sorted(p.name for p in second.iterdir()) == ["two.txt"]
+
+
+def test_backing_up_the_same_path_again_keeps_the_first_pristine_copy(places):
+    anchor, root, a, _ = places
+    f = a / "settings.json"
+    f.write_text("pristine", encoding="utf-8")
+    first = fsutil.backup(f, root, anchor)
+    f.write_text("already modified by an earlier step", encoding="utf-8")
+    again = fsutil.backup(f, root, anchor)
+    assert again == first and first.read_text(encoding="utf-8") == "pristine"
+
+
+def test_paths_under_the_anchor_keep_their_relative_layout(places):
+    anchor, root, _, _ = places
+    f = anchor / ".gemini" / "GEMINI.md"
+    f.parent.mkdir()
+    f.write_text("mine", encoding="utf-8")
+    assert fsutil.backup(f, root, anchor) == root / ".gemini" / "GEMINI.md"
+
+
+def test_backing_up_a_missing_path_returns_none(places):
+    anchor, root, a, _ = places
+    assert fsutil.backup(a / "nope.txt", root, anchor) is None

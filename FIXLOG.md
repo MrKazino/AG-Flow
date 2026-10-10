@@ -157,9 +157,13 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Parity (R7):** Windows native + POSIX (WSL) both exercised. Windows has no directory fsync (cannot open a directory) and ignores mode bits by design.
 
 ### F15 — backup collision
-- **Status:** pending · **Location (verified):** `fsutil.py:78–92` · **Doctor rule:** none (primitive)
-- **Phase-0 evidence:** two `mcp_config.json` → one destination (`'from b'`); two `plugin/` dirs merged.
-- **Change / files / tests / evidence:** pending.
+- **Status:** fixed · **Location (verified):** `fsutil.py:78–92` · **Doctor rule:** none (primitive; guarded by `tests/test_fsutil.py`)
+- **Phase-0 evidence:** two `mcp_config.json` from different dirs mapped to one destination (`'from b'`, first lost); two `plugin/` dirs merged into one backup.
+- **Root cause:** outside the anchor the destination was the bare file name, and `dirs_exist_ok=True` merged instead of failing.
+- **Change:** `backup()` places anything outside the anchor at `_external/<sha1(resolved path)[:12]>/<name>`; no more `dirs_exist_ok`; if the same path was already backed up into the same root, the first (pristine) copy is kept and returned. Anchor-relative layout is unchanged. Manifests store absolute backup paths, so manifests written by 0.2.0 still uninstall (tested).
+- **Files:** `src/agflow/fsutil.py`, `tests/test_fsutil.py`, `tests/test_install_atomic.py`.
+- **Tests added (6):** same-name files from different dirs both restorable; same-name dirs not merged; same path twice keeps the pristine copy; anchor-relative layout unchanged; missing path returns None; a 0.2.0-style manifest still uninstalls.
+- **Evidence:** Windows 287 passed / 7 skipped; `ruff` clean. **WSL (POSIX) run not done for this commit** (usage limit reached) — to be run with the Phase 2 gate.
 
 ### F16 — `mcpServers` type validation
 - **Status:** pending · **Location (verified):** `mcp_registry.py:45–50,96–104` · **Doctor rule:** none (CLI/API error path)

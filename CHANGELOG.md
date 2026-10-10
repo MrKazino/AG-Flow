@@ -27,6 +27,10 @@ audit registry tracked in [PLAN.md](PLAN.md) and [FIXLOG.md](FIXLOG.md).
   token in the query string must send it as the `X-Agflow-Token` header instead. Browser use is unaffected.
 
 ### Fixed
+- **Backups of same-named files no longer overwrite each other (F15).** Files outside your home directory were
+  backed up under their bare file name, so two `mcp_config.json` from different projects shared one backup and
+  the first was lost (same-named directories were merged). They are now stored under a per-path folder, and
+  backing up the same file twice keeps the first, pristine copy. Existing install manifests keep working.
 - **Migrating a workflow never loses or crashes on an earlier `.bak` (F8).** `agflow migrate` / `agflow fix` kept
   the original workflow as `<name>.md.bak` by renaming onto that name: on Windows a second migration crashed with
   `FileExistsError`, on Linux/macOS it silently replaced the previous backup. They now use the first free name
