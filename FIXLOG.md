@@ -105,9 +105,14 @@ Legend — **status**: `pending` · `fixed` · `n/a` (invalid / not reproduced) 
 - **Change / files / tests / evidence:** pending.
 
 ### F14 — atomic write hazards
-- **Status:** pending · **Location (verified):** `fsutil.py:17–27` · **Doctor rule:** none (primitive)
-- **Phase-0 evidence:** no `fsync` in module; symlink/mode not exercisable on this Windows machine (WinError 1314) → to be proven in WSL.
-- **Change / files / tests / evidence:** pending.
+- **Status:** fixed · **Location (verified):** `fsutil.py:17–27` · **Doctor rule:** none (primitive; guarded by `tests/test_fsutil.py`)
+- **Phase-0 evidence:** no `fsync` in module; symlink/mode not exercisable on this Windows machine (WinError 1314) → proven in WSL below.
+- **Root cause:** the helper was a rename recipe without the durability (fsync file + directory) and identity-preservation (symlink, mode) steps.
+- **Change:** `atomic_write_text(path, text, *, durable=True)`: writes *through* a symlink (link survives, target replaced; a dangling link creates its target); preserves an existing file's permission bits on POSIX (new files stay `0600`, deliberately); fsyncs the file before `os.replace` and the parent directory after it (POSIX; only the "filesystem cannot fsync a directory" errnos `EINVAL/ENOTSUP/EBADF` are tolerated, everything else propagates). `write_json`/`write_yaml` inherit it.
+- **Files:** `src/agflow/fsutil.py`, `tests/test_fsutil.py` (new), `tests/conftest.py` (from T0).
+- **Tests added (10):** fsync-before-rename ordering, directory fsync, `durable=False`, symlink stays a symlink, dangling symlink, mode preserved, new-file mode unchanged, failed replace leaves original and no temp file, parent dirs created, json/yaml writers inherit.
+- **Evidence (G1, POSIX):** against the *old* `fsutil.py` in WSL, **7 of 10 fail** (symlink replaced by a regular file; mode became 0600; no fsync; no `durable` kwarg) and **10/10 pass** with the fix. **G2:** Windows 192 passed / 6 skipped (POSIX-only + symlink privilege); WSL Ubuntu-24.04 (Python 3.12.3) **198 passed, 0 skipped**; `ruff` clean.
+- **Parity (R7):** Windows native + POSIX (WSL) both exercised. Windows has no directory fsync (cannot open a directory) and ignores mode bits by design.
 
 ### F15 — backup collision
 - **Status:** pending · **Location (verified):** `fsutil.py:78–92` · **Doctor rule:** none (primitive)

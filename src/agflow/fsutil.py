@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -14,17 +16,59 @@ if TYPE_CHECKING:
     from ruamel.yaml import YAML
 
 
-def atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+def atomic_write_text(path: Path, text: str, *, durable: bool = True) -> None:
+    """Replace ``path`` with ``text`` so a reader (or a crash) sees the old or the new content, never a mix.
+
+    * a symlink is written *through*: the link survives and its target is replaced (linked dotfiles keep
+      working), instead of the link being swapped for a regular file;
+    * an existing file keeps its permission bits (POSIX); a new file stays owner-only (``mkstemp``'s 0600);
+    * ``durable`` (default) fsyncs the data before the rename and the directory after it, so the rename cannot
+      be persisted without the data it points at.
+    """
+    target = Path(os.path.realpath(path)) if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
-        os.replace(tmp, path)
+            if durable:
+                fh.flush()
+                os.fsync(fh.fileno())
+        _keep_mode(target, tmp)
+        os.replace(tmp, target)
+        if durable:
+            _fsync_dir(target.parent)
     except BaseException:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+
+
+def _keep_mode(existing: Path, tmp: str) -> None:
+    if os.name == "nt":
+        return  # mode bits are advisory on Windows; chmod would only toggle the read-only flag
+    try:
+        mode = stat.S_IMODE(os.stat(existing).st_mode)
+    except FileNotFoundError:
+        return  # a new file keeps mkstemp's private 0600
+    os.chmod(tmp, mode)
+
+
+# errno values meaning "this filesystem cannot fsync a directory" (some network and overlay filesystems)
+_DIR_FSYNC_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EBADF}
+
+
+def _fsync_dir(directory: Path) -> None:
+    if os.name == "nt":
+        return  # a directory cannot be opened for fsync on Windows
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in _DIR_FSYNC_UNSUPPORTED:
+            raise
+    finally:
+        os.close(fd)
 
 
 def read_json(path: Path, default: Any = None) -> Any:
