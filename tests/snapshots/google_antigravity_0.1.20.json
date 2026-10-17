@@ -1,0 +1,101 @@
+{
+  "Agent": {
+    "async_context_manager": true,
+    "chat_returns": "ChatResponse",
+    "public": [
+      "chat",
+      "conversation",
+      "conversation_id",
+      "is_started",
+      "sandbox_status"
+    ]
+  },
+  "BuiltinTools": {
+    "ASK_QUESTION": "ask_question",
+    "CREATE_FILE": "create_file",
+    "EDIT_FILE": "edit_file",
+    "FIND_FILE": "find_file",
+    "FINISH": "finish",
+    "GENERATE_IMAGE": "generate_image",
+    "LIST_DIR": "list_directory",
+    "READ_URL_CONTENT": "read_url_content",
+    "RUN_COMMAND": "run_command",
+    "SCHEDULE": "schedule",
+    "SEARCH_DIR": "search_directory",
+    "SEARCH_WEB": "search_web",
+    "START_SUBAGENT": "start_subagent",
+    "VIEW_FILE": "view_file"
+  },
+  "CapabilitiesConfig": {
+    "agent_behavior": "google.antigravity.types.AgentBehavior",
+    "allowed_subagents": "list[str] | None",
+    "compaction_threshold": "int | None",
+    "disabled_tools": "list[google.antigravity.types.BuiltinTools] | None",
+    "enable_subagents": "bool",
+    "enabled_tools": "list[google.antigravity.types.BuiltinTools] | None",
+    "finish_tool_schema_json": "str | None",
+    "max_subagent_depth": "int | None",
+    "run_command_config": "google.antigravity.types.RunCommandConfig | None",
+    "tool_output_truncation_config": "google.antigravity.types.ToolOutputTruncationConfig | None"
+  },
+  "ChatResponse": [
+    "cancel",
+    "chunks",
+    "resolve",
+    "stop_reason",
+    "structured_output",
+    "text",
+    "thoughts",
+    "tool_calls",
+    "usage_metadata"
+  ],
+  "LocalAgentConfig": {
+    "api_key": "str | None",
+    "app_data_dir": "str | None",
+    "budget_config": "google.antigravity.types.BudgetConfig | None",
+    "capabilities": "google.antigravity.types.CapabilitiesConfig",
+    "compaction_config": "google.antigravity.types.CompactionConfig | None",
+    "conversation_id": "str | None",
+    "debug_config": "google.antigravity.connections.connection.DebugConfig | None",
+    "env": "dict[str, str] | None",
+    "hooks": "list[google.antigravity.hooks.hooks.InspectHook | google.antigravity.hooks.hooks.DecideHook | google.antigravity.hooks.hooks.TransformHook]",
+    "location": "str | None",
+    "mcp_servers": "list[google.antigravity.types.McpStdioServer | google.antigravity.types.McpStreamableHttpServer]",
+    "model": "str | google.antigravity.models.ModelTarget | None",
+    "models": "list[google.antigravity.models.ModelTarget] | None",
+    "policies": "list[google.antigravity.hooks.policy.Policy]",
+    "project": "str | None",
+    "response_schema": "dict[str, typing.Any] | type[pydantic.main.BaseModel] | str | None",
+    "retry_config": "google.antigravity.types.RetryConfig | None",
+    "save_dir": "str | None",
+    "session_continuation_mode": "google.antigravity.types.SessionContinuationMode | None",
+    "skills_paths": "list[str]",
+    "subagents": "list[google.antigravity.types.SubagentConfig]",
+    "system_instructions": "str | google.antigravity.types.CustomSystemInstructions | google.antigravity.types.TemplatedSystemInstructions | None",
+    "tools": "list[Callable[..., typing.Any] | str]",
+    "triggers": "list[Callable[[google.antigravity.triggers.triggers.TriggerContext], Awaitable[None]]]",
+    "vertex": "bool | None",
+    "workspaces": "list[str]"
+  },
+  "ToolCall": {
+    "args": "dict[str, typing.Any]",
+    "canonical_path": "str | None",
+    "id": "str | None",
+    "name": "google.antigravity.types.BuiltinTools | str",
+    "server_name": "str | None",
+    "step_id": "str | None"
+  },
+  "policy": {
+    "allow": "(tool: 'str | types.BaseMcpServerConfig', mcp_tools: 'Sequence[str] | None' = None, *, when: 'Predicate | None' = None, name: 'str' = '') -> 'Any'",
+    "allow_all": "() -> 'Policy'",
+    "ask_user": "(tool: 'str | types.BaseMcpServerConfig', mcp_tools: 'Sequence[str] | None' = None, *, handler: 'AskUserHandler | None' = None, when: 'Predicate | None' = None, name: 'str' = '', reason: 'str' = '') -> 'Any'",
+    "auto": "(*, name: 'str' = 'auto', handler: 'AskUserHandler | None' = None, model: 'str | None' = None) -> 'AutoPolicy'",
+    "confirm_run_command": "(handler: 'AskUserHandler | None' = None) -> 'list[Policy]'",
+    "deny": "(tool: 'str | types.BaseMcpServerConfig', mcp_tools: 'Sequence[str] | None' = None, *, when: 'Predicate | None' = None, name: 'str' = '', reason: 'str' = '') -> 'Any'",
+    "deny_all": "() -> 'Policy'",
+    "enforce": "(policies: 'Sequence[Policy | Sequence[Policy]]', *, mcp_servers: 'Sequence[types.BaseMcpServerConfig] | None' = None) -> 'hooks.PreToolCallDecideHook'",
+    "flatten_policies": "(policies: 'Sequence[Policy | Sequence[Policy]]') -> 'list[Policy]'",
+    "safe_defaults": "(handler: 'AskUserHandler') -> 'list[Policy]'",
+    "workspace_only": "(workspaces: 'Sequence[PathOrStr]') -> 'list[Policy]'"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "_provenance": "vendor-doc",
+  "_source": "agy-customizations/docs/hooks.md, 'PreToolUse Contract' input example; command changed to a force-push",
+  "event": "pre-tool-use",
+  "payload": {
+    "toolCall": {"name": "run_command", "args": {"CommandLine": "git push --force origin main"}},
+    "stepIdx": 20,
+    "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+    "workspacePaths": ["<WS>"],
+    "modelName": "auto"
+  },
+  "expect": {"problems": [], "decision": "ask"}
+}

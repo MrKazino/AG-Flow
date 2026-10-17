@@ -193,6 +193,153 @@ def test_schema_rejects(bad, msg):
         parse_graph_text(bad)
 
 
+# --- F24a: duplicate dependencies, and an input named like a dict method --------------------------------------------
+
+
+def test_a_repeated_dependency_is_rejected_and_names_the_node_and_the_dependency():
+    bad = "id: x\nnodes:\n  - {id: a, agent: q}\n  - {id: b, agent: q, depends_on: [a, a]}"
+    with pytest.raises(GraphError, match=r"node 'b' lists the same dependency more than once: \['a'\]"):
+        parse_graph_text(bad)
+    parse_graph_text("id: x\nnodes:\n  - {id: a, agent: q}\n  - {id: b, agent: q, depends_on: [a]}")  # control
+
+
+def test_the_bundled_graphs_have_no_repeated_dependencies():
+    from agflow.graph.schema import load_graph
+    from tests.conftest import REPO
+
+    graphs = sorted((REPO / "plugin" / "graphs").glob("*.yaml"))
+    assert graphs
+    for path in graphs:
+        load_graph(path)  # raises on any violation
+
+
+@pytest.mark.parametrize("name", ["items", "keys", "values", "get", "copy", "update", "pop", "title"])
+def test_an_input_named_like_a_dict_method_renders_its_value(name):
+    text = (f"id: x\ninputs:\n  {name}: {{type: string, required: true}}\nnodes:\n"
+            f"  - {{id: a, agent: q, prompt: 'Do {{{{ inputs.{name} }}}}', when: inputs.{name} == 'VALUE'}}")
+    g = parse_graph_text(text)
+    s = engine.new_run(g, coerce_inputs(g, {name: "VALUE"}), "/ws", now=0, run_id="r1")
+    assert engine.claim(g, s, now=1) == ["a"]  # the `when` condition saw the value, not a bound method
+    assert engine.build_card(g, s, "a")["task"] == "Do VALUE"
+
+
+def test_dict_methods_are_still_available_when_there_is_no_such_input():
+    from agflow.graph import templating
+
+    ctx = {"inputs": {"a": 1, "b": 2}}
+    assert templating.render("{% for k, v in inputs.items() %}{{ k }}={{ v }};{% endfor %}", ctx) == "a=1;b=2;"
+    assert templating.render("{{ inputs.get('zzz', 'dflt') }} {{ inputs.keys() | list }}", ctx) == "dflt ['a', 'b']"
+
+
+def test_the_template_sandbox_still_refuses_dunder_access():
+    from jinja2.exceptions import SecurityError
+
+    from agflow.graph import templating
+
+    ctx = {"inputs": {"a": 1}}
+    for template in ("{{ inputs.__class__ }}", "{{ ''.__class__.__mro__ }}", "{{ range.__globals__ }}"):
+        with pytest.raises(SecurityError):
+            templating.render(template, ctx)
+    # a key that merely *looks* like an attribute is data, never the attribute
+    assert templating.render("{{ inputs.__class__ }}", {"inputs": {"__class__": "just data"}}) == "just data"
+
+
+# --- F27: `advance` renders the nodes' outputs once per pass, with identical results ---------------------------------
+
+
+def _random_graph_text(rng, size: int) -> str:
+    """A random DAG: some nodes carry a `when` over what earlier nodes did, some are gates that may rework."""
+    lines = ["id: rnd", "inputs:", "  flag: {type: boolean, default: true}", "  items: {type: string, default: v}",
+             "defaults: {retries: 1, max_parallel: 3, timeout_min: 10}", "nodes:"]
+    for i in range(size):
+        deps = sorted(rng.sample(range(i), k=rng.randint(0, min(i, 3)))) if i else []
+        dep_ids = [f"n{d}" for d in deps]
+        parts = [f"id: n{i}", f"outputs: ['out-{{{{ run.id }}}}-n{i}']"]
+        if dep_ids and rng.random() < 0.25:
+            parts += ["type: gate", f"depends_on: [{', '.join(dep_ids)}]"]
+            if rng.random() < 0.7:
+                parts.append(f"on_fail: {{goto: {dep_ids[0]}, max_loops: 2}}")
+        else:
+            parts += ["agent: worker"]
+            if dep_ids:
+                parts.append(f"depends_on: [{', '.join(dep_ids)}]")
+            if rng.random() < 0.6:
+                dep = rng.choice(dep_ids) if dep_ids else f"n{i}"
+                when = rng.choice([
+                    "inputs.flag", "inputs.items == 'v'", f"nodes.{dep}.status == 'succeeded'",
+                    f"nodes.{dep}.outputs[0] == 'out-r1-{dep}'", f"nodes.{dep}.summary != ''",
+                    f"'a.txt' in nodes.{dep}.artifacts", "nodes.missing.status == 'x'", "not inputs.flag",
+                    f"nodes.{dep}.status == 'skipped'", f"nodes.{dep}.status in ['skipped', 'succeeded']",
+                ])
+                parts.append(f"when: \"{when}\"")
+        lines.append("  - {" + ", ".join(parts) + "}")
+    return "\n".join(lines)
+
+
+def _drive(graph, rng, *, steps=40):
+    """Run a graph to completion with random verdicts; return the state after every step."""
+    state = engine.new_run(graph, coerce_inputs(graph, {}), "/ws", now=0, run_id="r1")
+    snapshots = [state.model_dump(mode="json")]
+    for step in range(1, steps):
+        claimed = engine.claim(graph, state, now=float(step))
+        for nid in claimed:
+            verdict = rng.choice(["succeeded", "succeeded", "failed", "rejected"])
+            engine.report(graph, state, nid, verdict, now=float(step) + 0.5,
+                          summary=rng.choice(["", "did it"]), artifacts=rng.choice([[], ["a.txt"]]))
+        snapshots.append(state.model_dump(mode="json"))
+        if state.status != "running":
+            break
+    return snapshots
+
+
+@pytest.mark.parametrize("seed", range(60))
+def test_advance_gives_the_same_decisions_as_a_fresh_context_for_every_condition(seed, monkeypatch):
+    """The pass-local context must equal :func:`engine.context` at every evaluation: same states, same events."""
+    import random
+
+    class ReferenceContext:  # the behaviour before F27: build the whole context again for each `when`
+        def __init__(self, graph, state):
+            self.graph, self.state = graph, state
+
+        def get(self):
+            return engine.context(self.graph, self.state)
+
+    graph = parse_graph_text(_random_graph_text(random.Random(seed), size=6 + seed % 7))
+    fast = _drive(graph, random.Random(seed * 7 + 1))
+    with monkeypatch.context() as mp:
+        mp.setattr(engine, "_PassContext", ReferenceContext)
+        reference = _drive(graph, random.Random(seed * 7 + 1))
+    assert fast == reference
+
+
+def test_advance_renders_each_outputs_template_once_per_pass(monkeypatch):
+    from agflow.graph import templating
+
+    n_when = 6
+    lines = ["id: wide", "inputs:", "  flag: {type: boolean, default: true}", "nodes:",
+             "  - {id: root, agent: a, outputs: ['o-{{ run.id }}-root', 'p-{{ run.id }}-root']}"]
+    for i in range(n_when):  # half of the conditions are true (stay pending), half false (skipped in this pass)
+        cond = 'nodes.root.status == "succeeded"' if i % 2 == 0 else "not inputs.flag"
+        lines.append(f"  - {{id: w{i}, agent: a, depends_on: [root], outputs: ['o-{{{{ run.id }}}}-w{i}'], "
+                     f"when: '{cond}'}}")
+    graph = parse_graph_text("\n".join(lines))
+    state = engine.new_run(graph, coerce_inputs(graph, {}), "/ws", now=0, run_id="r1")
+    engine.claim(graph, state, now=1)
+    rendered = []
+    real = templating.render
+
+    def counting(template, ctx):
+        rendered.append(template)
+        return real(template, ctx)
+
+    monkeypatch.setattr(templating, "render", counting)
+    engine.report(graph, state, "root", "succeeded", now=2)  # the pass that decides all six conditions
+    assert [state.nodes[f"w{i}"].status for i in range(n_when)] == [
+        Status.PENDING, Status.SKIPPED, Status.PENDING, Status.SKIPPED, Status.PENDING, Status.SKIPPED]
+    templates = 2 + n_when
+    assert len(rendered) == templates, f"{len(rendered)} renders for {templates} templates"
+
+
 def test_input_coercion():
     g = graph()
     assert coerce_inputs(g, {"goal": "g", "ui": "yes"}) == {"goal": "g", "ui": True}

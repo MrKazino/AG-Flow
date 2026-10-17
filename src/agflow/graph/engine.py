@@ -119,8 +119,15 @@ def new_run(graph: Graph, inputs: dict[str, Any], workspace: str, *, now: float,
 # --- evaluation ---------------------------------------------------------------------------------
 
 
-def context(graph: Graph, state: RunState) -> dict[str, Any]:
-    base = {"inputs": state.inputs, "run": {"id": state.run_id, "workspace": state.workspace}}
+def _base_context(state: RunState) -> dict[str, Any]:
+    return {"inputs": state.inputs, "run": {"id": state.run_id, "workspace": state.workspace}}
+
+
+def _rendered_outputs(graph: Graph, base: dict[str, Any]) -> dict[str, list[str]]:
+    return {n.id: [_safe_render(o, base) for o in n.outputs] for n in graph.nodes}
+
+
+def _node_view(graph: Graph, state: RunState, outputs: dict[str, list[str]]) -> dict[str, Any]:
     nodes: dict[str, Any] = {}
     for n in graph.nodes:
         ns = state.nodes[n.id]
@@ -128,9 +135,34 @@ def context(graph: Graph, state: RunState) -> dict[str, Any]:
             "status": ns.status.value,
             "summary": ns.summary,
             "artifacts": list(ns.artifacts),
-            "outputs": [_safe_render(o, base) for o in n.outputs],
+            "outputs": list(outputs[n.id]),
         }
-    return {**base, "nodes": nodes}
+    return nodes
+
+
+def context(graph: Graph, state: RunState) -> dict[str, Any]:
+    base = _base_context(state)
+    return {**base, "nodes": _node_view(graph, state, _rendered_outputs(graph, base))}
+
+
+class _PassContext:
+    """The template context for the ``when`` conditions of one :func:`advance` pass.
+
+    A node's rendered ``outputs`` depend only on the inputs and the run, so they are rendered once per pass instead of
+    once per ``when`` (which compiled and rendered every node's templates again for every condition). The node view
+    (status, summary, artifacts) is rebuilt for each evaluation because decisions taken earlier in the same pass change
+    it. ``get()`` returns exactly what :func:`context` would at that moment.
+    """
+
+    def __init__(self, graph: Graph, state: RunState):
+        self.graph, self.state = graph, state
+        self._base = _base_context(state)
+        self._outputs: dict[str, list[str]] | None = None
+
+    def get(self) -> dict[str, Any]:
+        if self._outputs is None:
+            self._outputs = _rendered_outputs(self.graph, self._base)
+        return {**self._base, "nodes": _node_view(self.graph, self.state, self._outputs)}
 
 
 def _safe_render(template: str, ctx: dict[str, Any]) -> str:
@@ -155,6 +187,7 @@ def advance(graph: Graph, state: RunState, *, now: float) -> list[dict[str, Any]
     if state.status == "aborted":
         return events
     order = topo_order(graph)
+    when_context = _PassContext(graph, state)
     changed = True
     while changed:
         changed = False
@@ -178,7 +211,7 @@ def advance(graph: Graph, state: RunState, *, now: float) -> list[dict[str, Any]
                 continue
             if node.when:
                 try:
-                    ok = bool(templating.evaluate(node.when, context(graph, state)))
+                    ok = bool(templating.evaluate(node.when, when_context.get()))
                 except Exception as exc:
                     _set(ns, Status.FAILED, now, error=f"`when` evaluation failed: {exc}")
                     events.append({"event": "failed", "node": nid, "error": ns.error})

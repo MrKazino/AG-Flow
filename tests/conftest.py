@@ -11,6 +11,12 @@ REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugin"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--update-sdk-snapshot", action="store_true", default=False,
+                     help="rewrite tests/snapshots/google_antigravity_<version>.json from the installed SDK "
+                          "(review the diff before committing it)")
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _sandbox_guard(tmp_path_factory: pytest.TempPathFactory):
     """Fail loudly if any code resolves the user's home outside pytest's temp tree.

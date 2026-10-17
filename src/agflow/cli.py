@@ -12,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from agflow import __version__, frontmatter, paths
+from agflow import __version__, frontmatter, paths, platform_vocab
 from agflow.fsutil import atomic_write_text, read_yaml
 from agflow.inventory import Inventory
 from agflow.models import Kind, Level
@@ -96,7 +96,7 @@ def doctor(
                                  extra_layouts=[paths.plugin_layout(path)])
     else:
         inv = Inventory.discover(ws_of(workspace), include_global=not no_global)
-    all_issues = validate_inventory(inv)
+    all_issues = validate_inventory(inv, probe_hooks=True)  # also runs agflow's installed hook commands once
     issues = [i for i in all_issues if not source or i.source in source]
     counts = summarize(issues)
     sources = by_source(issues)
@@ -134,7 +134,8 @@ def doctor(
             fail("--fix works on the installed setup (not with --path or --json); use `agflow fix --json` instead")
         result = _interactive_fix(ws_of(workspace), yes=yes)
         if result is not None:
-            issues = [i for i in validate_inventory(Inventory.discover(ws_of(workspace), include_global=not no_global))
+            issues = [i for i in validate_inventory(Inventory.discover(ws_of(workspace), include_global=not no_global),
+                                                    probe_hooks=True)
                       if not source or i.source in source]
             counts = summarize(issues)
     if counts["error"] or (strict and counts["warning"]):
@@ -205,7 +206,7 @@ def _interactive_fix(workspace: Path, *, yes: bool) -> Any:
 
     from agflow import fixes
 
-    plan = fixes.build_plan(workspace)
+    plan = fixes.build_plan(workspace, probe_hooks=True)
     console.rule("[bold]Fix")
     _print_plan(plan, show_manual=True)
     if not plan.fixes:
@@ -232,7 +233,7 @@ def _interactive_fix(workspace: Path, *, yes: bool) -> Any:
     if not selections:
         console.print("Nothing applied.")
         return None
-    result = fixes.apply(workspace, selections)
+    result = fixes.apply(workspace, selections, plan=plan)
     console.print()
     _print_result(result)
     return result
@@ -287,7 +288,7 @@ def fix_cmd(
         return
 
     ws = ws_of(workspace)
-    plan = fixes.build_plan(ws)
+    plan = fixes.build_plan(ws, probe_hooks=True)
     options: dict[str, str] = {}
     for item in option:
         fid, sep, opt = item.partition("=")
@@ -333,7 +334,7 @@ def fix_cmd(
                 console.print(f"  [dim]- {escape(change)}[/]")
     if not yes and not as_json and not typer.confirm(f"\nApply {len(selections)} fix(es)?", default=True):
         raise typer.Exit(1)
-    result = fixes.apply(ws, selections)
+    result = fixes.apply(ws, selections, plan=plan)
     if as_json:
         print_json(result.to_dict())
     else:
@@ -521,26 +522,33 @@ def migrate(
     dry_run: bool = typer.Option(False, "--dry-run"),
     no_global: bool = typer.Option(False, "--no-global"),
 ) -> None:
-    """Convert workflows to skills (workflows retire 2026-11-01) and move 1.x layouts to 2.x."""
+    """Convert workflows to skills (retired 2026-11-01) and move 1.x layouts to 2.x; `agflow fix --undo` reverts it."""
+    from agflow import fixes
     from agflow.migrate import migrate_all
 
-    report = migrate_all(ws_of(workspace), include_global=not no_global, dry_run=dry_run)
+    if dry_run:
+        report = migrate_all(ws_of(workspace), include_global=not no_global, dry_run=True)
+    else:
+        report = fixes.migrate_undoable(ws_of(workspace), include_global=not no_global)
     for a in report.actions:
         console.print(f"  {a}", markup=False, highlight=False)
     for c in report.conflicts:
         console.print(f"[yellow]conflict:[/] {c}")
     if not report.actions and not report.conflicts:
         console.print("[green]✓[/] nothing to migrate")
+    elif report.actions and not dry_run:
+        console.print("[dim]Undo with `agflow fix --undo`.[/]")
 
 
 @app.command()
 def hook(event: str = typer.Argument(..., help="pre-tool-use | post-tool-use | stop")) -> None:
     """Hook entry point used by hooks.json (reads JSON on stdin, writes a JSON decision)."""
-    from agflow.hooks import HANDLERS, run_hook
+    from agflow.hooks import HANDLERS
+    from agflow.hooks import main as hook_main
 
     if event not in HANDLERS:
         fail(f"unknown hook event {event!r}; valid: {', '.join(HANDLERS)}")
-    sys.stdout.write(run_hook(event) + "\n")
+    raise typer.Exit(hook_main(event))  # same process contract as the `python -m agflow hook` fast path
 
 
 @app.command()
@@ -667,8 +675,10 @@ def agents_list(workspace: Path | None = WorkspaceOpt, as_json: bool = typer.Opt
 def agents_new(
     name: str,
     description: str = typer.Option(..., "--description", "-d"),
-    model: str = typer.Option("inherit", "--model", help="inherit | flash | pro"),
-    tools: str = typer.Option("view_file,grep_search,list_dir", "--tools", help="Comma-separated tool names."),
+    model: str = typer.Option(platform_vocab.builtin().model_inherit, "--model",
+                              help=" | ".join(platform_vocab.builtin().agent_models)),
+    tools: str = typer.Option(",".join(platform_vocab.builtin().default_agent_tools), "--tools",
+                              help="Comma-separated tool names."),
     main: bool = typer.Option(False, "--main", help="Selectable as the primary agent."),
     scope: str = typer.Option("workspace", "--scope"),
     workspace: Path | None = WorkspaceOpt,
@@ -716,16 +726,15 @@ def rules_list(workspace: Path | None = WorkspaceOpt, as_json: bool = typer.Opti
 @rules_app.command("new")
 def rules_new(
     name: str,
-    trigger: str = typer.Option("model_decision", "--trigger", help="always_on | model_decision | glob | manual"),
+    trigger: str = typer.Option("model_decision", "--trigger", help=" | ".join(platform_vocab.builtin().rule_triggers)),
     description: str = typer.Option("", "--description", "-d"),
     globs: str = typer.Option("", "--globs", help="Comma-separated globs (trigger=glob)."),
     workspace: Path | None = WorkspaceOpt,
 ) -> None:
     """Scaffold a workspace rule with valid trigger frontmatter."""
-    from agflow.validate import RULE_TRIGGERS
-
-    if trigger not in RULE_TRIGGERS:
-        fail(f"trigger must be one of {sorted(RULE_TRIGGERS)}")
+    triggers = platform_vocab.current().rule_triggers
+    if trigger not in triggers:
+        fail(f"trigger must be one of {sorted(triggers)}")
     if trigger == "glob" and not globs:
         fail("--globs is required with --trigger glob")
     meta: dict[str, Any] = {"trigger": trigger}
@@ -913,9 +922,15 @@ def sync_gemini_cli(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Copy enabled skills and MCP servers into Gemini CLI's config."""
+    from agflow.sync import SyncError
     from agflow.sync import sync_gemini_cli as do_sync
 
-    report = do_sync(ws_of(workspace), project=project, dry_run=dry_run)
+    try:
+        report = do_sync(ws_of(workspace), project=project, dry_run=dry_run)
+    except SyncError as exc:
+        fail(str(exc))
+    for note in report.notes:
+        console.print(note, style="dim", markup=False, highlight=False)
     for a in report.actions:
         console.print(f"  {a}", markup=False, highlight=False)
     for s in report.skipped:

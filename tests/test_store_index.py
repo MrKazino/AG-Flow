@@ -254,3 +254,27 @@ def test_doctor_is_quiet_when_runs_are_healthy(workspace: Path):
     make_run(RunStore(workspace), "succeeded", 1)
     issues = validate_inventory(Inventory.discover(workspace, include_global=False, include_legacy=False))
     assert not [i for i in issues if i.code.startswith("runs.")]
+
+
+# --- N1: the global run index is a shortcut; its failure is recorded -----------------------------------------------
+
+
+def test_an_unwritable_global_run_index_is_in_the_ledger_and_does_not_fail_the_run(
+        store: RunStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from agflow.graph import store as store_module
+
+    blocker = write(tmp_path / "a-file", "x")  # the index would have to live below a regular file
+    monkeypatch.setattr(store_module, "_index_file", lambda: blocker / "runs-index.json")
+    state = make_run(store, "running", 1)
+    assert store.load(state.run_id).status == "running"
+    graph = _bugfix_graph()
+    created = store.create(graph, coerce_inputs(graph, {"bug": "b"}))
+    events = {e["event"]: e for e in store.read_ledger(created.run_id)}
+    assert "run_index_unwritable" in events and "Error" in events["run_index_unwritable"]["reason"]
+    assert store_module.register_run("r", store.workspace) is not None
+
+
+def test_a_writable_global_run_index_records_nothing_unusual(store: RunStore):
+    graph = _bugfix_graph()
+    created = store.create(graph, coerce_inputs(graph, {"bug": "b"}))
+    assert "run_index_unwritable" not in {e["event"] for e in store.read_ledger(created.run_id)}

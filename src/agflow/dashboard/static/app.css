@@ -1,41 +1,33 @@
+/* One palette: each token is light-dark(light, dark). The page follows the system setting; the theme switch only
+   forces `color-scheme`, so no colour is written twice. */
 :root {
-  --bg: #f7f7fb;
-  --panel: #ffffff;
-  --panel-2: #f1f2f8;
-  --text: #1c1d26;
-  --muted: #62657a;
-  --border: #e2e3ee;
-  --accent: #4f46e5;
-  --accent-soft: #eceafe;
-  --ok: #1f7a3d;
-  --ok-soft: #e3f4e8;
-  --warn: #9a6200;
-  --warn-soft: #fdf1d8;
-  --err: #b3261e;
-  --err-soft: #fbe3e1;
-  --info: #1a5fb4;
-  --info-soft: #e1ecfa;
-  --neutral: #8a8da0;
-  --shadow: 0 1px 2px rgba(16, 17, 38, .06), 0 4px 16px rgba(16, 17, 38, .06);
+  color-scheme: light dark;
+  --bg: light-dark(#f7f7fb, #0f1017);
+  --panel: light-dark(#ffffff, #171824);
+  --panel-2: light-dark(#f1f2f8, #1e2030);
+  --text: light-dark(#1c1d26, #e8e9f3);
+  --muted: light-dark(#62657a, #9b9eb5);
+  --border: light-dark(#e2e3ee, #2a2c40);
+  --accent: light-dark(#4f46e5, #8b85ff);
+  --accent-soft: light-dark(#eceafe, #25234a);
+  --ok: light-dark(#1f7a3d, #5ccf85);
+  --ok-soft: light-dark(#e3f4e8, #173024);
+  --warn: light-dark(#9a6200, #f2b84b);
+  --warn-soft: light-dark(#fdf1d8, #34290f);
+  --err: light-dark(#b3261e, #ff7b72);
+  --err-soft: light-dark(#fbe3e1, #3a1a18);
+  --info: light-dark(#1a5fb4, #79b0ff);
+  --info-soft: light-dark(#e1ecfa, #172842);
+  --neutral: light-dark(#8a8da0, #6e7188);
+  /* a shadow is geometry plus colours; only the colours differ between the themes (dark has no soft outer layer) */
+  --shadow-near: light-dark(rgba(16, 17, 38, .06), rgba(0, 0, 0, .4));
+  --shadow-far: light-dark(rgba(16, 17, 38, .06), transparent);
+  --shadow: 0 1px 2px var(--shadow-near), 0 4px 16px var(--shadow-far);
   --radius: 12px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  color-scheme: light;
 }
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0f1017; --panel: #171824; --panel-2: #1e2030; --text: #e8e9f3; --muted: #9b9eb5;
-    --border: #2a2c40; --accent: #8b85ff; --accent-soft: #25234a; --ok: #5ccf85; --ok-soft: #173024;
-    --warn: #f2b84b; --warn-soft: #34290f; --err: #ff7b72; --err-soft: #3a1a18; --info: #79b0ff;
-    --info-soft: #172842; --neutral: #6e7188; --shadow: 0 1px 2px rgba(0, 0, 0, .4); color-scheme: dark;
-  }
-}
-:root[data-theme="dark"] {
-  --bg: #0f1017; --panel: #171824; --panel-2: #1e2030; --text: #e8e9f3; --muted: #9b9eb5;
-  --border: #2a2c40; --accent: #8b85ff; --accent-soft: #25234a; --ok: #5ccf85; --ok-soft: #173024;
-  --warn: #f2b84b; --warn-soft: #34290f; --err: #ff7b72; --err-soft: #3a1a18; --info: #79b0ff;
-  --info-soft: #172842; --neutral: #6e7188; --shadow: 0 1px 2px rgba(0, 0, 0, .4); color-scheme: dark;
-}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }

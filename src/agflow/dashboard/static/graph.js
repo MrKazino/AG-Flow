@@ -16,9 +16,12 @@
   function truncate(s, n) { s = s || ""; return s.length > n ? s.slice(0, n - 1) + "…" : s; }
 
   function render(container, layout, statuses) {
-    container.innerHTML = "";
+    container.replaceChildren();
     if (!layout || !layout.nodes || !layout.nodes.length) {
-      container.innerHTML = '<div class="empty">No nodes</div>';
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No nodes";
+      container.appendChild(empty);
       return;
     }
     const layers = {};

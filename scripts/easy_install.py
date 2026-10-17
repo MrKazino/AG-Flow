@@ -148,6 +148,9 @@ def classify_failure(output: str) -> str:
 
 # --- processes that keep the installed agflow busy (Windows only) -----------------------------------------
 
+# Match on the executable's path only. The old query also matched any process whose *command line* mentioned the
+# folder, which stopped editors and terminals that merely had it open. CreationDate is recorded so the PID can be
+# re-verified right before it is stopped (Windows reuses PIDs).
 _PS_FIND = r"""
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
@@ -155,11 +158,23 @@ $t = $env:AGFLOW_TOOL_ENV.TrimEnd('\') + '\'
 $b = $env:AGFLOW_TOOL_EXE
 $cmp = [System.StringComparison]::OrdinalIgnoreCase
 $items = @(Get-CimInstance Win32_Process | Where-Object {
-    $_.ProcessId -ne $PID -and (
-      ($_.ExecutablePath -and ($_.ExecutablePath.StartsWith($t, $cmp) -or $_.ExecutablePath -ieq $b)) -or
-      ($_.CommandLine -and $_.CommandLine.IndexOf($t, $cmp) -ge 0))
-  } | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name;
-                                          path = $_.ExecutablePath; cmd = $_.CommandLine } })
+    $_.ProcessId -ne $PID -and $_.ExecutablePath -and
+      ($_.ExecutablePath.StartsWith($t, $cmp) -or $_.ExecutablePath -ieq $b)
+  } | ForEach-Object {
+    $made = if ($_.CreationDate) { $_.CreationDate.ToString('o') } else { '' }
+    [pscustomobject]@{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name;
+                       path = $_.ExecutablePath; cmd = $_.CommandLine; created = $made } })
+ConvertTo-Json -InputObject $items -Compress -Depth 3
+"""
+
+_PS_IDENTITY = r"""
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$ErrorActionPreference = 'Stop'
+$ids = @($env:AGFLOW_PIDS -split ',' | Where-Object { $_ })
+$items = @(Get-CimInstance Win32_Process | Where-Object { $ids -contains [string]$_.ProcessId } |
+  ForEach-Object {
+    $made = if ($_.CreationDate) { $_.CreationDate.ToString('o') } else { '' }
+    [pscustomobject]@{ pid = $_.ProcessId; path = $_.ExecutablePath; created = $made } })
 ConvertTo-Json -InputObject $items -Compress -Depth 3
 """
 
@@ -216,8 +231,49 @@ def find_agflow_processes(uv: str) -> list[dict]:
         return []
 
 
+def owned_by_tool(proc: dict, tool_env: Path, exe: Path) -> bool:
+    """True if the process runs an executable inside agflow's tool environment, or is the agflow launcher itself."""
+    path = proc.get("path")
+    if not path:
+        return False
+    norm = os.path.normcase(os.path.normpath(str(path)))
+    env = os.path.normcase(os.path.normpath(str(tool_env))) + os.sep  # the separator keeps `agflow-other` out
+    return norm.startswith(env) or norm == os.path.normcase(os.path.normpath(str(exe)))
+
+
+def same_identity(before: dict, now: dict | None) -> bool:
+    """The process listed earlier is still the same one: same executable and same start time (PIDs get reused)."""
+    if not now or not before.get("created") or before["created"] != now.get("created"):
+        return False
+    return os.path.normcase(str(before.get("path"))) == os.path.normcase(str(now.get("path")))
+
+
+def current_identities(pids: list[int]) -> dict[int, dict]:
+    """Executable and start time of the given PIDs as they are right now (Windows)."""
+    env = {**os.environ, "AGFLOW_PIDS": ",".join(str(p) for p in pids)}
+    try:
+        proc = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                               "-Command", _PS_IDENTITY], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", env=env, timeout=60)
+        return {int(p["pid"]): p for p in parse_processes(proc.stdout)}
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        warn("could not re-check the processes before stopping them; stopping none of them")
+        return {}
+
+
 def stop_processes(uv: str, procs: list[dict], timeout: float = 10.0) -> None:
-    pids = sorted({int(p["pid"]) for p in procs})
+    """Stop the listed processes, but only those that are still exactly the processes that were listed."""
+    now = current_identities([int(p["pid"]) for p in procs])
+    pids = []
+    for p in procs:
+        pid = int(p["pid"])
+        if same_identity(p, now.get(pid)):
+            pids.append(pid)
+        elif pid in now:
+            warn(f"PID {pid} is no longer the process that was listed (the PID was reused); not stopping it")
+    pids = sorted(set(pids))
+    if not pids:
+        return
     args = ["taskkill", "/T", "/F"]
     for pid in pids:
         args += ["/PID", str(pid)]
@@ -287,8 +343,13 @@ def tool_install(uv: str, base: list[str], target: Path, sdk: bool, assume_yes: 
 
 
 def confirm(question: str, assume_yes: bool) -> bool:
-    if assume_yes or not sys.stdin.isatty():
+    """Ask before anything that stops processes or touches ~/.gemini. No terminal means nobody can answer, and an
+    unanswered question is not consent: stop and say how to approve explicitly (``--yes``)."""
+    if assume_yes:
         return True
+    if not sys.stdin.isatty():
+        raise InstallFailed(f"{question.strip()} needs your approval, but this session is not interactive. Re-run "
+                            "with --yes to approve every step, or run the installer in a terminal.")
     answer = input(f"      {question} [Y/n] ").strip().lower()
     return answer in ("", "y", "yes")
 

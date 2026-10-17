@@ -52,12 +52,13 @@ async def run_graph(store: RunStore, run_id: str, backend: AgentBackend, *, appr
                 break
             done, _ = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
-                nid = tasks.pop(task)
+                nid = tasks[task]  # in flight until its result is recorded: if that fails, `finally` gives it back
                 try:
                     result = task.result()
                 except Exception as exc:  # backend crash counts as a failed attempt
                     result = NodeResult(status="failed", summary=f"backend error: {type(exc).__name__}: {exc}")
                 _report(store, run_id, nid, result, log)
+                del tasks[task]
     finally:
         if tasks:  # interrupted: cancel in-flight work and give the nodes back without burning attempts
             for task in tasks:

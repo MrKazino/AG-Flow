@@ -53,12 +53,12 @@ When a skill's description matches the task, load it and follow its procedure: s
 ## 5. Orchestration with agflow graphs
 For Complex work the **agflow** MCP server holds the graph state and you act as the dispatcher.
 1. `graph_list` → choose a graph (`feature-delivery`, `bugfix`, `security-sweep`, `ui-feature`, `release`) or design one with `graph-design`.
-2. `graph_start(graph, workspace=<absolute path>, inputs)`.
-3. Loop: `graph_next` → for **every** card call `invoke_subagent` with `card.agent` and `card.subagent_prompt` verbatim, all cards in parallel → read each subagent's final JSON block → `graph_report(run_id, node_id, status, summary, artifacts)` → repeat.
+2. `graph_start` with the graph id, the absolute workspace path and the inputs.
+3. Loop: `graph_next` → for **every** card call `invoke_subagent` with `card.agent` and `card.subagent_prompt` verbatim, all cards in parallel → read each subagent's final JSON block → `graph_report` its `status`, `summary` and `artifacts` → repeat.
 4. Human cards: ask the user the card's question; report `succeeded` (approved) or `rejected`.
-5. Stop when the run status is no longer `running`; finish with a walkthrough built from `graph_status(verbose=true)`.
+5. Stop when the run status is no longer `running`; finish with a walkthrough built from `graph_status` (verbose).
 
-Report `rejected` when a review or verification verdict is negative (this triggers rework) and `failed` when a node could not finish (this triggers a retry). Never report `succeeded` without evidence in the summary. After a restart, use `graph_runs(only_active=true)` and then `graph_resume`.
+Report `rejected` when a review or verification verdict is negative (this triggers rework) and `failed` when a node could not finish (this triggers a retry). Never report `succeeded` without evidence in the summary. After a restart, use `graph_runs` (active only) and then `graph_resume`. The `graph-run` skill has the exact signature of every tool.
 
 ## 6. Engineering standards
 - **Code:** clear names, small functions, early returns, no dead or commented-out code, no TODO stubs presented as finished. Comments explain *why*.

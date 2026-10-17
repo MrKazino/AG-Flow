@@ -18,7 +18,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from agflow import __version__, mcp_registry, paths, toggles
+from agflow import __version__, hook_health, mcp_registry, paths, toggles
 from agflow.fsutil import atomic_write_text, backup, timestamp
 from agflow.graph import catalog, engine
 from agflow.graph.render import to_mermaid
@@ -137,6 +137,7 @@ def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SE
             "doctor": summarize(issues),
             "active_runs": [_run_brief(r) for r in RunStore(ws).active()],
             "gemini_md_limit": paths.GEMINI_MD_CHAR_LIMIT,
+            "hook_health": hook_health.summary(),  # None while the safety hooks understand everything they receive
         }
 
     @app.get("/api/doctor")
@@ -308,9 +309,11 @@ def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SE
 
     @app.post("/api/migrate")
     def do_migrate(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from agflow import fixes
         from agflow.migrate import migrate_all
 
-        report = migrate_all(ws, dry_run=bool(body.get("dry_run", True)))
+        # a real run is recorded in the fix history, so "Undo last fix" reverts it
+        report = migrate_all(ws, dry_run=True) if body.get("dry_run", True) else fixes.migrate_undoable(ws)
         return {"ok": True, "actions": report.actions, "conflicts": report.conflicts}
 
     # -- graphs ---------------------------------------------------------------------------------

@@ -350,3 +350,156 @@ def test_legacy_migration_fix_is_fully_undoable_workspace_and_global(home, works
 
     fixes.undo_last()
     assert snapshot(workspace) == before_ws and snapshot(home) == before_home
+
+
+# --- F19: applying fixes must not rediscover the whole setup more often than necessary --------------------------------
+
+
+@pytest.fixture
+def discoveries(monkeypatch):
+    """Counts Inventory.discover calls (each one walks every scope and parses every component)."""
+    calls = [0]
+    real = Inventory.discover.__func__
+
+    def counting(cls, *a, **k):
+        calls[0] += 1
+        return real(cls, *a, **k)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(Inventory, "discover", classmethod(counting))
+        yield calls
+
+
+def _workspace_with_a_workflow(workspace):
+    write(workspace / ".agents" / "workflows" / "ship.md", "---\ndescription: Ship it\n---\n1. Ship\n")
+
+
+def test_apply_with_a_plan_discovers_only_for_the_final_recheck(home, workspace, discoveries):
+    _workspace_with_a_workflow(workspace)
+    plan = fixes.build_plan(workspace)
+    discoveries[0] = 0
+    result = fixes.apply(workspace, fixes.select(plan), plan=plan)
+    assert result.applied and not result.failed
+    assert discoveries[0] == 1  # the one fresh look after the change, which cannot be skipped
+    assert result.before == fixes.summarize(plan.issues) and result.after["error"] == 0
+
+
+def test_apply_without_a_plan_still_builds_its_own(home, workspace, discoveries):
+    _workspace_with_a_workflow(workspace)
+    plan = fixes.build_plan(workspace)  # to learn the id; apply() re-plans because the dashboard's plan is stale
+    discoveries[0] = 0
+    result = fixes.apply(workspace, fixes.select(plan))
+    assert result.applied and discoveries[0] == 2
+
+
+def test_cli_fix_apply_discovers_twice_not_three_times(home, workspace, discoveries):
+    _workspace_with_a_workflow(workspace)
+    r = _cli("fix", "-w", workspace, "--apply", "--yes")
+    assert r.exit_code == 0, r.output
+    assert discoveries[0] == 2  # one to plan, one to re-check (was three: plan, plan again inside apply, re-check)
+
+
+# --- F29: fixes use install's public API only ---------------------------------------------------------------------
+
+
+def test_fixes_reaches_into_no_private_name_of_install():
+    """``fixes`` used to call ``install._plugin_target`` and friends; a rename inside install would have broken it
+    silently at the next fix. Only public names may cross the module boundary."""
+    import ast
+
+    tree = ast.parse((Path(fixes.__file__)).read_text(encoding="utf-8"))
+    install_aliases = {"install"}
+    private = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "agflow.install":
+            private += [a.name for a in node.names if a.name.startswith("_")]
+        if isinstance(node, ast.ImportFrom) and node.module == "agflow":
+            install_aliases |= {a.asname or a.name for a in node.names if a.name == "install"}
+        if isinstance(node, ast.Import):
+            install_aliases |= {a.asname for a in node.names if a.name == "agflow.install" and a.asname}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in install_aliases
+                and node.attr.startswith("_")):
+            private.append(f"{node.value.id}.{node.attr}")
+    assert private == [], f"fixes.py uses private names of install: {private}"
+
+
+def test_the_helpers_fixes_needs_are_public_in_install():
+    from agflow import install as inst
+
+    for name in ("manifest_path", "plugin_target", "master_rule", "BLOCK_RE", "MASTER_RULE"):
+        assert hasattr(inst, name), name
+    assert inst.manifest_path("global", None).name == "install.json"
+    assert inst.plugin_target("global", None).name == paths.PLUGIN_NAME
+    assert inst.master_rule("body").startswith("---\n") and inst.BLOCK_RE.search(f"{inst.BEGIN}\nx\n{inst.END}\n")
+
+
+# --- N3: `agflow migrate` has a way back -----------------------------------------------------------------------------
+
+
+def _legacy_setup(home, workspace):
+    for rel, text in ((".agent/rules/a.md", "Alpha rule.\n"),
+                      (".agent/skills/s1/SKILL.md", "---\nname: s1\ndescription: " + "d" * 50 + "\n---\nbody\n"),
+                      (".agents/workflows/ship.md", "---\ndescription: Ship it\n---\n1. Ship\n")):
+        write(workspace / rel, text)
+    legacy = home / ".gemini" / "antigravity"
+    write(legacy / "skills" / "gs" / "SKILL.md", "---\nname: gs\ndescription: " + "d" * 50 + "\n---\nbody\n")
+    write(legacy / "mcp_config.json", json.dumps({"mcpServers": {"legacy": {"command": "echo"}}}))
+    write(home / ".gemini" / "config" / "mcp_config.json", json.dumps({"mcpServers": {"mine": {"command": "node"}}}))
+
+
+def test_migrate_is_one_batch_that_fix_undo_reverts_byte_for_byte(home, workspace):
+    _legacy_setup(home, workspace)
+    before_ws, before_home = snapshot(workspace), snapshot(home)
+    report = fixes.migrate_undoable(workspace)
+    assert len(report.actions) == 5 and not report.conflicts
+    assert snapshot(workspace) != before_ws and snapshot(home) != before_home
+    merged = json.loads((home / ".gemini" / "config" / "mcp_config.json").read_text(encoding="utf-8"))
+    assert set(merged["mcpServers"]) == {"mine", "legacy"}, "the user's own server is kept next to the migrated one"
+    batch = fixes.history()[-1]
+    assert batch["fixes"] == ["agflow migrate"]
+    fixes.undo_last()
+    assert snapshot(workspace) == before_ws and snapshot(home) == before_home
+
+
+def test_a_second_migrate_records_nothing_and_a_dry_run_changes_nothing(home, workspace):
+    _legacy_setup(home, workspace)
+    before = snapshot(workspace), snapshot(home)
+    from agflow.migrate import migrate_all
+
+    assert migrate_all(workspace, dry_run=True).actions
+    assert (snapshot(workspace), snapshot(home)) == before
+    fixes.migrate_undoable(workspace)
+    batches = len(fixes.history())
+    assert not fixes.migrate_undoable(workspace).actions
+    assert len(fixes.history()) == batches, "a run that did nothing leaves no batch to undo"
+
+
+def test_the_migrate_command_records_the_batch_and_says_how_to_undo_it(home, workspace):
+    _legacy_setup(home, workspace)
+    before = snapshot(workspace), snapshot(home)
+    out = _cli("migrate", "-w", workspace)
+    assert out.exit_code == 0 and "agflow fix --undo" in out.output
+    assert _cli("migrate", "-w", workspace, "--dry-run").exit_code == 0
+    fixes.undo_last()
+    assert (snapshot(workspace), snapshot(home)) == before
+
+
+def test_a_migration_that_stops_half_way_can_still_be_undone(home, workspace, monkeypatch):
+    from agflow import migrate as migrate_module
+
+    _legacy_setup(home, workspace)
+    before = snapshot(workspace), snapshot(home)
+    real = migrate_module.migrate_legacy_global
+
+    def fails_after_the_workspace_part(*args, **kwargs):
+        if kwargs.get("dry_run"):
+            return real(*args, **kwargs)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(migrate_module, "migrate_legacy_global", fails_after_the_workspace_part)
+    with pytest.raises(OSError, match="disk full"):
+        fixes.migrate_undoable(workspace)
+    assert snapshot(workspace) != before[0], "the workspace part was done before the failure"
+    fixes.undo_last()
+    assert (snapshot(workspace), snapshot(home)) == before

@@ -1,20 +1,34 @@
 {
-  "hooks": {
+  "agflow": {
     "PreToolUse": [
       {
-        "matcher": ".*(command|file|write|replace|edit).*",
-        "command": "agflow hook pre-tool-use"
+        "matcher": ".*(command|file|code_action|write|replace|edit).*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agflow hook pre-tool-use",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": ".*(command|file|write|replace|edit|subagent).*",
-        "command": "agflow hook post-tool-use"
+        "matcher": ".*(command|write|replace|edit|code_action|subagent).*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agflow hook post-tool-use",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
       {
-        "command": "agflow hook stop"
+        "type": "command",
+        "command": "agflow hook stop",
+        "timeout": 10
       }
     ]
   }

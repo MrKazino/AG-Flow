@@ -20,11 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agflow import frontmatter, paths
+from agflow import frontmatter, paths, platform_vocab
 from agflow.fsutil import read_json, unique_sibling, write_json
 from agflow.inventory import Inventory
 from agflow.models import Issue, Item, Kind, Level
-from agflow.validate import AGENT_EXEC_POLICIES, NAME_RE, RULE_TRIGGERS, summarize, validate_inventory
+from agflow.validate import NAME_RE, summarize, validate_inventory
 
 HISTORY_MAX = 20
 GEMINI_MD_TARGET = paths.GEMINI_MD_CHAR_LIMIT - 1_000  # leave headroom after moving sections out
@@ -205,6 +205,7 @@ class FixPlan:
     issues: list[Issue]
     fixes: list[Fix] = field(default_factory=list)
     manual: list[Manual] = field(default_factory=list)
+    probed: bool = False  # the plan's issues include the result of actually running agflow's hook commands
 
     def get(self, fix_id: str) -> Fix | None:
         return next((f for f in self.fixes if f.id == fix_id), None)
@@ -270,6 +271,11 @@ def _user_owned(issue: Issue) -> bool:
     return issue.source in ("global", "workspace")
 
 
+# Warnings about agflow's own hooks.json that a reinstall repairs: it rewrites the file in the documented layout and
+# points its commands at the agflow that is running (so a dead executable path is replaced by a working one).
+HOOK_CODES_FIXED_BY_REINSTALL = ("hooks.inert", "hooks.unguarded", "hooks.broken")
+
+
 def _is_agflow(issue: Issue) -> bool:
     return paths.plugin_base_name(issue.source) == paths.PLUGIN_NAME
 
@@ -297,6 +303,7 @@ def _frontmatter_value_fix(issue: Issue, title: str, key: str, choices: list[tup
 
 def _build(issue: Issue, inv: Inventory) -> Fix | Manual | None:
     code, path = issue.code, issue.path
+    vocab = platform_vocab.current(inv.workspace)
     if issue.level == Level.INFO:
         return None
     if code == "plugin.installed_twice":
@@ -305,7 +312,7 @@ def _build(issue: Issue, inv: Inventory) -> Fix | Manual | None:
         return _fix_gemini_md(issue, inv)
     if code == "legacy.config":
         return _fix_legacy(issue, inv)
-    if _is_agflow(issue) and issue.level == Level.ERROR:
+    if _is_agflow(issue) and (issue.level == Level.ERROR or code in HOOK_CODES_FIXED_BY_REINSTALL):
         return _fix_reinstall_agflow(issue, inv)
     if not _user_owned(issue) or path is None:
         return _manual(issue)
@@ -335,7 +342,7 @@ def _build(issue: Issue, inv: Inventory) -> Fix | Manual | None:
         normalized = {"alwayson": "always_on", "always": "always_on", "modeldecision": "model_decision",
                       "model": "model_decision", "auto": "model_decision"}.get(current.replace("_", ""), current)
         order = ["model_decision", "always_on", "manual"]
-        if normalized in RULE_TRIGGERS and normalized != "glob":
+        if normalized in vocab.rule_triggers and normalized != "glob":
             order.remove(normalized)
             order.insert(0, normalized)
         return _frontmatter_value_fix(
@@ -348,9 +355,9 @@ def _build(issue: Issue, inv: Inventory) -> Fix | Manual | None:
                                       [("model_decision", "trigger: model_decision", "model_decision")], "review")
     if code == "agent.model":
         return _frontmatter_value_fix(issue, "Use a valid model tier", "model",
-                                      [(m, f"model: {m}", m) for m in ("inherit", "pro", "flash")], "review")
+                                      [(m, f"model: {m}", m) for m in vocab.agent_models], "review")
     if code == "agent.exec_policy":
-        order = ["auto"] + sorted(AGENT_EXEC_POLICIES - {"auto"})
+        order = ["auto"] + sorted(set(vocab.exec_policies) - {"auto"})
         return _frontmatter_value_fix(issue, "Use a valid commandExecutionPolicy", "commandExecutionPolicy",
                                       [(p, f"commandExecutionPolicy: {p}", p) for p in order], "review")
     if code == "agent.flag":
@@ -377,9 +384,9 @@ def _fix_installed_twice(issue: Issue, inv: Inventory) -> Fix | Manual:
     def remove_copy(txn: Txn, item: Item) -> None:
         where = location(item)
         ws = inv.workspace if where == "workspace" else None
-        manifest = inst._manifest_path(where, ws) if where in ("global", "workspace") else None
+        manifest = inst.manifest_path(where, ws) if where in ("global", "workspace") else None
         data = read_json(manifest, None) if manifest is not None else None
-        if not data or Path(inst._plugin_target(where, ws)).absolute() != item.path.parent.absolute():
+        if not data or Path(inst.plugin_target(where, ws)).absolute() != item.path.parent.absolute():
             txn.remove(item.path.parent)  # not installed by agflow's installer: just remove the folder
             return
         # agflow's own uninstall also restores the files the install replaced; back up all it can touch
@@ -416,8 +423,8 @@ def _fix_gemini_md(issue: Issue, inv: Inventory) -> Fix | Manual:
     assert path is not None
     text = _read(path)
     changes: list[str] = []
-    agflow_block = inst._BLOCK_RE.search(text)
-    working = inst._BLOCK_RE.sub("", text) if agflow_block else text
+    agflow_block = inst.BLOCK_RE.search(text)
+    working = inst.BLOCK_RE.sub("", text) if agflow_block else text
     global_plugin = paths.global_layout().plugins_dir / paths.PLUGIN_NAME  # type: ignore[operator]
     if agflow_block:
         changes.append(f"remove agflow's own block ({len(agflow_block.group(0)):,} chars); agflow keeps working "
@@ -460,10 +467,11 @@ def _fix_gemini_md(issue: Issue, inv: Inventory) -> Fix | Manual:
         if current != text:
             raise FixError("GEMINI.md changed since the fix was planned; run the fix again")
         if agflow_block and (global_plugin / "plugin.json").is_file():
-            rule = global_plugin / "rules" / inst.MASTER_RULE
+            rule = paths.plugin_layout(global_plugin).rules_dir / inst.MASTER_RULE
             if not rule.exists():
-                master = (paths.bundled_plugin_dir() / "GEMINI.md").read_text(encoding="utf-8").strip() + "\n"
-                txn.write(rule, inst._master_rule(master))
+                bundled = paths.plugin_layout(paths.bundled_plugin_dir()).gemini_md
+                master = bundled.read_text(encoding="utf-8").strip() + "\n"
+                txn.write(rule, inst.master_rule(master))
         stamp = time.strftime("%Y-%m-%d")
         for seg, name in chosen:
             section = working[seg["start"]:seg["end"]].strip() + "\n"
@@ -493,9 +501,9 @@ def _fix_reinstall_agflow(issue: Issue, inv: Inventory) -> Fix:
     scope = "workspace" if where == "workspace" else "global"
 
     def apply(txn: Txn) -> None:
-        target = inst._plugin_target(scope, inv.workspace)  # type: ignore[arg-type]
+        target = inst.plugin_target(scope, inv.workspace)  # type: ignore[arg-type]
         txn.touch(target)
-        txn.touch(inst._manifest_path(scope, inv.workspace))  # type: ignore[arg-type]
+        txn.touch(inst.manifest_path(scope, inv.workspace))  # type: ignore[arg-type]
         gm = paths.global_layout().gemini_md
         if gm is not None:
             txn.touch(gm)
@@ -688,10 +696,24 @@ def _manual(issue: Issue, extra: list[str] | None = None) -> Manual:
 # --- public API -------------------------------------------------------------------------------------------------
 
 
-def build_plan(workspace: Path | None) -> FixPlan:
+def migrate_undoable(workspace: Path | None, *, include_global: bool = True) -> Any:
+    """`agflow migrate`, recorded as one batch in the same history as `agflow fix`, so that `agflow fix --undo`
+    puts back what it moved, renamed, copied or merged (N3: it used to have no way back). Returns the report."""
+    from agflow.migrate import migrate_all
+
+    txn = Txn()
+    for path in migrate_all(workspace, include_global=include_global, dry_run=True).touched:
+        txn.touch(path)
+    try:
+        return migrate_all(workspace, include_global=include_global)
+    finally:  # a migration that stopped half-way is recorded too: its finished part can be undone
+        txn.commit(workspace, ["agflow migrate"])
+
+
+def build_plan(workspace: Path | None, *, probe_hooks: bool = False) -> FixPlan:
     inv = Inventory.discover(workspace)
-    issues = validate_inventory(inv)
-    plan = FixPlan(workspace=workspace, issues=issues)
+    issues = validate_inventory(inv, probe_hooks=probe_hooks)
+    plan = FixPlan(workspace=workspace, issues=issues, probed=probe_hooks)
     for issue in issues:
         built = _build(issue, inv)
         if isinstance(built, Fix):
@@ -730,8 +752,14 @@ def select(plan: FixPlan, *, include_review: bool = False, only: list[str] | Non
     return chosen
 
 
-def apply(workspace: Path | None, selections: dict[str, str | None]) -> ApplyResult:
-    plan = build_plan(workspace)
+def apply(workspace: Path | None, selections: dict[str, str | None], *, plan: FixPlan | None = None) -> ApplyResult:
+    """Apply the chosen fixes as one undoable batch.
+
+    A caller that has just built (and shown) the plan passes it in to avoid discovering the whole setup a second
+    time; without one, a fresh plan is built so ids that stopped applying meanwhile are reported as skipped. The
+    re-check after the changes always looks at the new state, so it is never skipped.
+    """
+    plan = plan if plan is not None else build_plan(workspace)
     result = ApplyResult(before=summarize(plan.issues))
     txn = Txn()
     titles = []
@@ -752,12 +780,12 @@ def apply(workspace: Path | None, selections: dict[str, str | None]) -> ApplyRes
     txn.commit(workspace, titles)
     if txn.ops:
         result.batch, result.backup_dir = txn.id, str(txn.root)
-    after = validate_inventory(Inventory.discover(workspace))
+    after = validate_inventory(Inventory.discover(workspace), probe_hooks=plan.probed)
     result.after = summarize(after)
     remaining = {i.id for i in after}
     result.unresolved = [a for a in result.applied if a["id"] in remaining]
     return result
 
 
-__all__ = ["ApplyResult", "Fix", "FixError", "FixPlan", "Manual", "apply", "build_plan", "history", "select",
-           "undo_last"]
+__all__ = ["ApplyResult", "Fix", "FixError", "FixPlan", "Manual", "apply", "build_plan", "history", "migrate_undoable",
+           "select", "undo_last"]

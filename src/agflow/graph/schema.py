@@ -31,6 +31,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agflow.fsutil import yaml_safe
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+DEFAULT_TIMEOUT_MIN = 30
+TIMEOUT_MIN_RANGE = (1, 24 * 60)  # minutes a node may be given; the headless runner clamps to the same bounds
 
 
 class GraphError(ValueError):
@@ -48,7 +50,7 @@ class InputSpec(BaseModel):
 class Defaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
     retries: int = Field(1, ge=0, le=10, description="extra attempts after a failed attempt")
-    timeout_min: int = Field(30, ge=1, le=24 * 60)
+    timeout_min: int = Field(DEFAULT_TIMEOUT_MIN, ge=TIMEOUT_MIN_RANGE[0], le=TIMEOUT_MIN_RANGE[1])
     max_parallel: int = Field(4, ge=1, le=64)
 
 
@@ -69,7 +71,7 @@ class Node(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     when: str | None = None
     retries: int | None = Field(None, ge=0, le=10)
-    timeout_min: int | None = Field(None, ge=1, le=24 * 60)
+    timeout_min: int | None = Field(None, ge=TIMEOUT_MIN_RANGE[0], le=TIMEOUT_MIN_RANGE[1])
     outputs: list[str] = Field(default_factory=list)
     acceptance: list[str] = Field(default_factory=list)
     require: Literal["all_succeeded", "any_succeeded"] = "all_succeeded"
@@ -133,6 +135,9 @@ class Graph(BaseModel):
                 raise ValueError(f"node '{n.id}' depends on unknown node(s) {missing}")
             if n.id in n.depends_on:
                 raise ValueError(f"node '{n.id}' depends on itself")
+            repeated = sorted({d for d in n.depends_on if n.depends_on.count(d) > 1})
+            if repeated:
+                raise ValueError(f"node '{n.id}' lists the same dependency more than once: {repeated}")
         order = topo_order(self)  # raises on cycles
         for n in self.nodes:
             if n.on_fail:

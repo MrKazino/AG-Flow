@@ -64,7 +64,7 @@ CI), set `AGFLOW_UV_VERSION` together with `AGFLOW_UV_INSTALLER_SHA256` (the SHA
 
 **Updating:** delete (or rename) the old project folder, extract the new zip to a fresh location, and run
 the `easy-installer.bat` that sits directly next to `pyproject.toml`. Line `[1/7]` of the output shows the
-version being installed (`ok agflow 0.2.0 …`); the installer stops if it finds a newer copy nested inside
+version being installed (`ok agflow 0.3.0 …`); the installer stops if it finds a newer copy nested inside
 the folder you ran it from, and verifies that the installed `agflow version` matches.
 
 **Windows and running agflow:** Windows can't replace a program that is running, and Google Antigravity
@@ -77,8 +77,8 @@ Explorer window inside `%APPDATA%\uv\tools\agflow`), it tells you exactly what t
 
 ```bash
 # 1. Install the manager (Python ≥ 3.10). Add [sdk] for headless runs.
-uv tool install "agflow[sdk] @ git+https://github.com/MrKazino/google-antigravity-workflow"
-#    or: pipx install "agflow[sdk] @ git+https://github.com/MrKazino/google-antigravity-workflow"
+uv tool install "agflow[sdk] @ git+https://github.com/MrKazino/AG-Flow"
+#    or: pipx install "agflow[sdk] @ git+https://github.com/MrKazino/AG-Flow"
 
 # 2. Install the plugin globally: master prompt, rules, skills, subagents, hooks, orchestrator MCP.
 agflow install --dry-run      # preview every file it will touch
@@ -139,9 +139,9 @@ flowchart LR
 
 **Inside Antigravity**, the loop is:
 
-1. `graph_start(graph, workspace, inputs)`
-2. `graph_next(run_id)` returns **dispatch cards** for every ready node, up to `max_parallel`. Each card holds a fully composed `subagent_prompt`: the task, inputs, upstream results, rework feedback, acceptance criteria and the result contract.
-3. The orchestrator calls `invoke_subagent(card.agent, card.subagent_prompt)` for **all** cards in parallel.
+1. `graph_start` (graph id, absolute workspace path, inputs)
+2. `graph_next` returns **dispatch cards** for every ready node, up to `max_parallel`. Each card holds a fully composed `subagent_prompt`: the task, inputs, upstream results, rework feedback, acceptance criteria and the result contract.
+3. The orchestrator calls `invoke_subagent` with `card.agent` and `card.subagent_prompt` for **all** cards in parallel.
 4. Each subagent ends with `{"status": "succeeded|failed|rejected", "summary", "artifacts", "followups"}`, and the orchestrator reports it with `graph_report`.
 5. The engine resolves the rest:
    - `failed` → retried until `retries` runs out
@@ -192,15 +192,16 @@ agflow init [--profile P]                    scaffold .agents/ in a workspace an
 agflow skills|agents|rules list|new|enable|disable
 agflow mcp list|catalog|add|remove|enable|disable|serve
 agflow profile list|show|apply
-agflow migrate [--dry-run]                   workflows → skills, .agent/ → .agents/, 1.x → 2.x paths
-agflow sync gemini-cli [--project]           share skills + MCP servers with Gemini CLI
+agflow migrate [--dry-run]                   workflows → skills, .agent/ → .agents/, 1.x → 2.x paths (`agflow fix --undo` reverts)
+agflow sync gemini-cli [--project]           share skills + MCP servers with Gemini CLI (checks Gemini CLI's settings first; writes nothing if they are not as expected)
 agflow graph list|validate|render|compile|run|resume|approve|status|runs|abort
 agflow dashboard                             local web UI
+agflow version                               print the installed version
 ```
 
 `doctor` reports **errors** only for problems that stop Antigravity from loading a file (bad frontmatter, invalid rule trigger, missing skill name/description, invalid JSON, unknown hook events, files over the 12,000-character cap). Style issues are warnings, and conventions Antigravity tolerates (for example underscore skill folders in Google's own plugins) are hidden info notes. Every issue is tagged with its source, so problems in other plugins or in your own files are never confused with agflow's.
 
-Disabling a skill, agent or rule moves it to agflow's parking area outside Antigravity's discovery paths, so it's fully reversible. MCP servers are disabled in place (`"disabled": true`). Writes are atomic and fsynced (a symlinked file is written through, and an existing file keeps its permissions), and each overwritten file is backed up under `~/.gemini/config/.agflow-backups/`.
+Disabling a skill, agent or rule moves it to agflow's parking area outside Antigravity's discovery paths, so it's fully reversible. Every parked item also carries a `.agflow-disabled` marker (inside a folder, beside a file): if something moves a disabled item back into a folder Antigravity scans, `agflow doctor` warns (`disabled.marker_leak`) that it is active despite being disabled, and a parked item whose index entry was lost is still listed and can be enabled. `agflow doctor` also warns (`disabled.in_scan_scope`) if the parking area ever lies inside a scanned folder. MCP servers are disabled in place (`"disabled": true`). Writes are atomic and fsynced (a symlinked file is written through, and an existing file keeps its permissions), and each overwritten file is backed up under `~/.gemini/config/.agflow-backups/`.
 
 `agflow install` is crash-safe: every backup is recorded in the install manifest *before* the thing it describes is changed, and the new plugin is built beside the old one and swapped in with two renames, so at every instant either the old or the new plugin is whole. If an install is interrupted (power loss, `kill`), `agflow doctor` reports `install.interrupted`; running `agflow install` (finish) or `agflow uninstall` (roll back) first puts a plugin that was moved aside back in place.
 
@@ -232,7 +233,7 @@ Disabling a skill, agent or rule moves it to agflow's parking area outside Antig
 | missing skill/agent description | derive "what + when" from the file's heading and first sentence | choice |
 | missing `name`, text booleans in agent flags, `model_decision` rule without description | fill in / coerce | safe |
 | deprecated workflow | convert it to a skill (the original is kept as `.bak`) | safe |
-| error in an installed agflow file | reinstall that agflow copy | safe |
+| error in an installed agflow file; hooks written in the layout Antigravity ignores (`hooks.inert`), without fail-open (`hooks.unguarded`), or that cannot start (`hooks.broken`) | reinstall that agflow copy, which rewrites the hooks and points them at the agflow that is running | safe |
 | Antigravity 1.x leftovers (`.agent/`, `~/.gemini/antigravity/skills`) | migrate them to the 2.x locations | choice |
 | missing referenced files, long skill bodies, secrets in MCP config, invalid JSON, true duplicates, other plugins' files | exact manual steps | manual |
 
@@ -286,10 +287,25 @@ Each node runs as a fresh `google.antigravity.Agent`, configured from the node's
 | Event | What it does |
 |---|---|
 | PreToolUse | **deny**: `rm -rf /` or `~`, `mkfs`, raw disk writes, fork bombs. **ask**: force-push, `git reset --hard`, `curl … \| sh`, `rm -r` outside the workspace, destructive SQL, `terraform destroy`, `kubectl delete`, publishing, `sudo`, reading `.env`/keys/credentials. It never returns "allow", so your own permission settings stay in charge. |
-| PostToolUse | Appends a compact entry to the ledger of each active run. |
-| Stop | Returns `continue` while an active run has claimable nodes and is progressing (capped). |
+| PostToolUse | Appends a compact entry to the ledger of each active run, for commands, edits and subagent calls (not for reads, so a plain `view_file` does not start a process). |
+| Stop | Returns `continue` while an active run has claimable nodes and is progressing (capped). It never pushes the agent on after an error or a limit, and it ignores a run that nobody has touched for 24 hours (a new conversation is not dragged back into it). |
 
-Hooks take a fast path that skips the CLI start-up, and their cost does not depend on how many runs a workspace holds: the active runs are found through a small self-healing index (`.agents/agflow/runs/.index.json`) instead of by reading every run. Measured with `scripts/bench.py` (1 running run among 1, 50 and 500 finished ones), the PostToolUse handler takes about 3–5 ms on Windows 11 and 0.3–1 ms on Linux (WSL2) at every size. What each hook call still pays is process start-up and imports, a constant of roughly 0.2 s on Linux and 0.6 s on Windows on the development machine used for those numbers; yours will differ. Tune them per workspace in `.agents/agflow/guard.yaml` (`deny:`, `ask:` and `allow:` regex lists), turn the guard off with `AGFLOW_GUARD=off`, or install without hooks using `agflow install --no-hooks`. Set `AGFLOW_HOOK_DEBUG=1` to log raw payloads to `~/.gemini/config/agflow/hook-debug.jsonl`.
+`agflow install` writes `hooks.json` in the layout Antigravity documents: a named hook (`agflow`) whose tool events hold `{matcher, hooks: [...]}` groups and whose `Stop` event holds plain handlers, each with a 10-second timeout. Earlier agflow releases wrote a different layout that Antigravity reads as a hook named `hooks` and, for the two tool events, ignores — so the guard and the run ledger never ran in a real session, and only the `Stop` hook did. `agflow doctor` reports that file as `hooks.inert`, and `agflow fix` rewrites it.
+
+Hooks take a fast path that skips the CLI start-up, and their cost does not depend on how many runs a workspace holds: the active runs are found through a small self-healing index (`.agents/agflow/runs/.index.json`) instead of by reading every run, and a session with no running run answers from that index without loading the run store, pydantic or a YAML parser. Measured with `scripts/bench.py` (1 running run among 1, 50 and 500 finished ones), the PostToolUse handler takes about 3–5 ms on Windows 11 and 0.3–1 ms on Linux (WSL2) at every size. What each hook call still pays is process start-up and imports, a constant of roughly 0.05 s on Linux and 0.2 s on Windows on the development machine used for those numbers (`python -m agflow hook …` with no running run; a bare `python -c pass` took 0.013 s and 0.1 s there); yours will differ. Tune them per workspace in `.agents/agflow/guard.yaml` (`deny:`, `ask:` and `allow:` regex lists), turn the guard off with `AGFLOW_GUARD=off`, or install without hooks using `agflow install --no-hooks`. Set `AGFLOW_HOOK_DEBUG=1` to log raw payloads to `~/.gemini/config/agflow/hook-debug.jsonl`.
+
+**A hook never breaks the agent, and it never fails silently either.** If Antigravity sends a payload agflow cannot read (a changed layout, a renamed `CommandLine`, invalid JSON) the hook still answers `{}` so the agent keeps working — but the guard could not check that call, so agflow records it: a line in `hook-debug.jsonl` (key names only, never values), a counter in `~/.gemini/config/agflow/hook-health.jsonl`, a `guard_unavailable` event in the ledger of each active run, a red banner on the dashboard overview, and an `agflow doctor` warning (`hooks.guard_blind`) that clears itself seven days after the last occurrence. A crashing handler is counted the same way. To teach agflow a renamed key without waiting for a release, add it under `hook_payload_keys` in `~/.gemini/config/agflow/vocab.json` (see [Compatibility notes](#compatibility-notes)).
+
+### When the agent reports an error
+
+Antigravity ends a turn with *"Agent execution terminated due to error"* or *"There was a network issue connecting to the server, please try again"* for reasons that are not all agflow's. A failing hook is the one agflow can cause, so hooks are built not to:
+
+- **Every installed hook command fails open.** If the agflow executable is missing, was replaced by an upgrade, or its tool environment was deleted (the classic `ModuleNotFoundError: No module named 'agflow'` from a stale `agflow.exe`), the command prints `{}` — "no opinion" for every event — with exit code 0 and a note on stderr, instead of the exit code 1 that Antigravity reports as *"Stop hook failed"* or *"pre-tool hooks failed"*. Inside agflow nothing can escape either: any exception, an unreadable input, or a handler that runs longer than 8 seconds still ends in `{}` with exit code 0.
+- **Nothing fails silently.** Fail-open hides the breakage from the agent, so `agflow doctor` (and `agflow fix`) *runs* each hook command of your installed agflow plugin the way Antigravity does and reports `hooks.broken` as an error when one cannot start, with the last line of its error. It runs only the global copy under your own `~/.gemini` (never a file from a workspace, which may belong to a repository you just cloned), only a line in exactly the form `agflow install` writes (one agflow call and the fixed fail-open tail, nothing a shell could treat as a second command), and in an empty scratch folder; the dashboard never runs anything. `agflow fix` reinstalls that copy and points the hooks at the agflow that is running; if agflow was installed with `uv tool`, `uv tool install --force --reinstall <agflow checkout or package>` repairs the broken environment itself. Hooks that predate fail-open are reported as `hooks.unguarded`.
+- **A stop caused by an error is final.** The Stop hook does not ask the agent to continue after the documented termination reasons for errors, exhausted steps or cancellation, so an outage is not met with a second round of the same failure.
+- **The "network issue" message is not from a hook.** It means Antigravity could not reach Google's model service; agflow's hooks, MCP server and dashboard make no outgoing network requests (the dashboard listens on 127.0.0.1 unless you change `--host`). Retry, and check a VPN, proxy or firewall rule if it persists. If it hit while a graph run was in flight, the orchestrator calls `graph_resume`, which returns the interrupted nodes to *ready* without spending an attempt.
+
+To tell the two kinds apart: a hook failure is logged by the Antigravity CLI as `failed to call custom stop hook …` (or `pre-tool hooks failed`) in `~/.gemini/antigravity-cli/log/cli-*.log`, and `agflow doctor` reports `hooks.broken`; a network failure is neither.
 
 ## Where Antigravity looks for things
 
@@ -323,6 +339,8 @@ nodes:
   - {id: ship, type: human, prompt: "Merge it?", depends_on: [gate]}
 ```
 
+Name inputs like node ids (lowercase, starting with a letter; `change`, `has_ui`): `agflow doctor` warns about any other name (`graph.input.name`) and agflow 0.4.0 will reject it. Prefer `_` to `-`, because `{{ inputs.bug-id }}` subtracts and only `inputs['bug-id']` reads that input.
+
 Save it to `.agents/agflow/graphs/api-change.yaml`, then:
 
 - `agflow graph validate` checks it
@@ -334,6 +352,8 @@ Save it to `.agents/agflow/graphs/api-change.yaml`, then:
 ```bash
 uv sync --all-extras
 uv run pytest                                   # engine, MCP (in-process + stdio), installer, hooks, CLI, dashboard, SDK config
+uv run pytest --cov=agflow                      # the same with a coverage report; CI fails below 88 % (Ubuntu, Python 3.12)
+uv run pytest tests/test_sdk_contract.py --update-sdk-snapshot   # after reviewing a new Antigravity SDK release (a nightly job checks the newest one)
 uv run ruff check src tests
 uv run agflow doctor --path plugin --strict     # the bundled plugin must stay clean
 uv run agflow graph validate plugin/graphs/*.yaml
@@ -346,9 +366,19 @@ Layout: `plugin/` holds the Antigravity plugin, shipped inside the wheel as `agf
 
 - These were verified against **Antigravity 2.x documentation as of September 2026**, MCP Python SDK 2.x, and `google-antigravity` SDK 0.1.20:
   - the paths, rule triggers, agent frontmatter and hook event names above
-  - Antigravity's hook stdin payload isn't formally documented, so the handlers parse it defensively
+  - the hook stdin payload follows Antigravity's own hook documentation (it ships inside the product, in `builtin/skills/agy-customizations/docs/hooks.md`: camelCase, the tool call under `toolCall`, `workspacePaths`); agflow also still accepts the older flat variants it used to guess. The contract tests in `tests/fixtures/hook_payloads/` label each sample's provenance (`vendor-doc`, `captured`, `synthetic`); no payload recorded from a live session is included yet.
+- The `hooks.json` layout agflow writes (named hook → event → `{matcher, hooks}` groups for the tool events, plain handlers for the others) follows `hooks.md` in the same Antigravity folder. It was checked against the Antigravity CLI 1.3.3 log, which counts the named hooks it loads and shows the hook that failed by name. The CLI's own change log says an empty `decision` from a pre-tool hook is handled since 1.0.16; before that it was an error, so with an older CLI install with `--no-hooks`.
 - Loading the plugin in a live Antigravity app and making SDK model calls can't be exercised in CI. Run `agflow doctor` after installing, and try the fake backend first.
 - Workflows are retired on **2026-11-01**. agflow ships only skills, and `agflow migrate` converts your existing workflows.
+- **The Antigravity vocabulary is data, not code.** Agent tool names, model tiers, execution policies, rule triggers,
+  hook events, hook-payload key variants and the workflow retirement date live in one versioned table
+  ([`src/agflow/data/platform_vocab.json`](src/agflow/data/platform_vocab.json), `vocab_version` is shown in doctor
+  messages). Everything else derives from it. If Antigravity renames or adds one, you do not need a new release:
+  put the change in `~/.gemini/config/agflow/vocab.json` (or `.agents/agflow/vocab.json` for one workspace), for
+  example `{"vocab_version": "mine", "agent_tools": {"add": ["new_tool"]}, "sdk_tool_map": {"set": {"new_tool":
+  "view_file"}}}`. An invalid override is ignored as a whole and reported by `agflow doctor`
+  (`vocab.override.invalid`); an applied one is listed as `vocab.override`. A tool name the table has never
+  heard of is reported as *unknown to this agflow version* (INFO in doctor, a warning when a headless agent starts).
 
 ## License
 

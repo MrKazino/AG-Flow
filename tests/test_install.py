@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agflow import frontmatter, paths
+from agflow import frontmatter, hookfile, paths
 from agflow.install import BEGIN, InstallError, install, uninstall
 from agflow.inventory import Inventory
 from agflow.models import Kind
@@ -25,8 +25,11 @@ def test_global_install_merges_and_uninstall_restores(home):
     assert len(text) < paths.GEMINI_MD_CHAR_LIMIT
     mcp = json.loads((target / "mcp_config.json").read_text())["mcpServers"]["agflow"]
     assert mcp["args"][-2:] == ["mcp", "serve"]
-    hooks = json.loads((target / "hooks.json").read_text())["hooks"]
-    assert hooks["PreToolUse"][0]["command"].endswith("hook pre-tool-use")
+    hooks = json.loads((target / "hooks.json").read_text())["agflow"]  # Antigravity's documented layout (H1)
+    pre = hooks["PreToolUse"][0]
+    assert pre["matcher"] and pre["hooks"][0]["type"] == "command" and pre["hooks"][0]["timeout"] > 0
+    assert "hook pre-tool-use" in pre["hooks"][0]["command"]
+    assert hooks["Stop"][0]["command"].count("hook stop") == 1  # events without a tool hold plain handlers
     assert any("backup" in a for a in plan.actions)
 
     # idempotent re-install keeps the original backups
@@ -108,8 +111,14 @@ def test_format_command_windows_paths(monkeypatch):
 
     spaced = r"C:\Users\Koosha Kazino\.local\bin\agflow.exe"
     monkeypatch.setattr(inst.shutil, "which", lambda name: None)
+    monkeypatch.setattr(inst, "_windows_short_path", lambda path: None)  # the real machine's 8.3 names stay out
     # never POSIX single quotes on Windows (cmd.exe can't run them)
     assert inst.format_command([spaced, "hook", "stop"], windows=True) == f'"{spaced}" hook stop'
+    # a quote-free 8.3 name beats quotes (the hook runner passes the line to `cmd /c` as one quoted argument)
+    short = r"C:\Users\KOOSHA~1\.local\bin\agflow.exe"
+    monkeypatch.setattr(inst, "_windows_short_path", lambda path: short)
+    assert inst.format_command([spaced, "hook", "stop"], windows=True) == short + " hook stop"
+    monkeypatch.setattr(inst, "_windows_short_path", lambda path: None)
     plain = r"C:\tools\agflow.exe"
     assert inst.format_command([plain, "hook", "stop"], windows=True) == plain + " hook stop"
     # spaced path that is also what `agflow` resolves to on PATH -> quote-free bare name
@@ -124,9 +133,9 @@ def test_installed_hooks_use_os_quoting(home, monkeypatch):
 
     monkeypatch.setattr(inst, "agflow_command", lambda: [str(home / "my tools" / "agflow"), ])
     install("global", with_gemini_md=False)
-    hooks = json.loads((paths.global_layout().plugins_dir / "agflow" / "hooks.json").read_text())["hooks"]
+    hooks = json.loads((paths.global_layout().plugins_dir / "agflow" / "hooks.json").read_text())["agflow"]
     cmd = hooks["Stop"][0]["command"]
-    assert cmd == inst.format_command([str(home / "my tools" / "agflow"), "hook", "stop"])
+    assert cmd == hookfile.fail_open(inst.format_command([str(home / "my tools" / "agflow"), "hook", "stop"]))
     mcp = json.loads((paths.global_layout().plugins_dir / "agflow" / "mcp_config.json").read_text())
     assert mcp["mcpServers"]["agflow"]["command"] == str(home / "my tools" / "agflow")  # JSON: no quoting needed
 

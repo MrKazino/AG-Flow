@@ -1,0 +1,7 @@
+{
+  "_provenance": "synthetic",
+  "_source": "deliberate drift: toolCall/name/args unchanged but the command argument was renamed (CommandLine -> ShellInput)",
+  "event": "pre-tool-use",
+  "payload": {"toolCall": {"name": "run_command", "args": {"ShellInput": "rm -rf /"}}, "workspacePaths": ["<WS>"]},
+  "expect": {"problems": ["guard_blind:command"], "decision": null}
+}

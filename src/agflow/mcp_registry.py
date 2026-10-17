@@ -38,7 +38,7 @@ def config_file(scope: str, workspace: Path | None) -> Path:
             raise McpError("workspace scope needs a workspace")
         return paths.workspace_layout(workspace).mcp_file  # type: ignore[return-value]
     if scope == "agy-cli":
-        return paths.agy_cli_dir() / "mcp_config.json"
+        return paths.agy_cli_mcp_file()
     raise McpError(f"unknown scope {scope!r} (global | workspace | agy-cli)")
 
 

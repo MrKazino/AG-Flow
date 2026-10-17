@@ -65,3 +65,18 @@ def test_model_tiers(monkeypatch):
 
 def test_node_result_schema():
     assert set(NodeResult.model_json_schema()["properties"]) == {"status", "summary", "artifacts", "followups"}
+
+
+def test_a_tool_the_vocabulary_has_never_heard_of_is_reported_not_silently_dropped(workspace, caplog):
+    """F32: if Antigravity renames a tool, the headless agent must say so instead of quietly losing a capability.
+    Tools Antigravity knows but the SDK has no equivalent for (browser_subagent) are normal and stay quiet."""
+    from tests.conftest import write
+
+    write(workspace / ".agents" / "agents" / "custom.md",
+          "---\nname: custom\ndescription: A custom agent for the vocabulary test.\nsubagent: true\ntools:\n"
+          "  - view_file\n  - browser_subagent\n  - brand_new_tool\n---\nbody\n")
+    with caplog.at_level("WARNING", logger="agflow.runner"):
+        cfg = SdkBackend(workspace).build_config({"agent": "custom"})
+    assert "brand_new_tool" in caplog.text and "unknown to this agflow version" in caplog.text
+    assert "browser_subagent" not in caplog.text
+    assert BuiltinTools.VIEW_FILE in set(cfg.capabilities.enabled_tools)

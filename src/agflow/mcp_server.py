@@ -13,7 +13,9 @@ server restarts, IDE reloads and hand-offs between agents.
 from __future__ import annotations
 
 import os
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,7 @@ from agflow import __version__, paths
 from agflow.graph import catalog, engine
 from agflow.graph.render import to_mermaid
 from agflow.graph.schema import GraphError, coerce_inputs, parse_graph_text
-from agflow.graph.store import RunNotFound, RunStore, lookup_workspace
+from agflow.graph.store import RUN_INDEX_MAX, RunNotFound, RunStore, lookup_workspace
 
 INSTRUCTIONS = """\
 agflow orchestrates multi-agent work as a graph. Loop: graph_start (once) -> graph_next -> dispatch
@@ -32,7 +34,20 @@ verbatim) -> parse each subagent's final JSON block -> graph_report -> graph_nex
 status is not 'running'. Human cards: ask the user card.task, then graph_report succeeded (approved)
 or rejected. Never mark a node succeeded without evidence. Always pass the absolute workspace path."""
 
-_workspaces: dict[str, Path] = {}
+# run id -> workspace for runs this server started or resumed. The server stays open for as long as Antigravity does,
+# so the cache is bounded (least recently used goes first); an evicted run is still found through the on-disk index
+# that RunStore.create writes (the same RUN_INDEX_MAX cap).
+WORKSPACE_CACHE_MAX = RUN_INDEX_MAX
+_workspaces: OrderedDict[str, Path] = OrderedDict()
+_workspaces_lock = threading.Lock()
+
+
+def _remember(run_id: str, workspace: Path) -> None:
+    with _workspaces_lock:
+        _workspaces[run_id] = workspace
+        _workspaces.move_to_end(run_id)
+        while len(_workspaces) > WORKSPACE_CACHE_MAX:
+            _workspaces.popitem(last=False)
 
 
 def _resolve_workspace(workspace: str | None, run_id: str | None = None) -> Path:
@@ -42,8 +57,10 @@ def _resolve_workspace(workspace: str | None, run_id: str | None = None) -> Path
             raise ValueError("workspace must be an absolute path")
         return ws.resolve()
     if run_id:
-        if run_id in _workspaces:
-            return _workspaces[run_id]
+        with _workspaces_lock:
+            if run_id in _workspaces:
+                _workspaces.move_to_end(run_id)
+                return _workspaces[run_id]
         found = lookup_workspace(run_id)
         if found:
             return found
@@ -102,7 +119,7 @@ def build_server() -> MCPServer:
             state = store.create(g, coerce_inputs(g, inputs), graph_path=str(path))
         except (GraphError, ValueError) as exc:
             return _error(str(exc))
-        _workspaces[state.run_id] = ws
+        _remember(state.run_id, ws)
         return {"ok": True, "run_id": state.run_id, **_brief(state)}
 
     @server.tool()
@@ -196,7 +213,7 @@ def build_server() -> MCPServer:
         except RunNotFound:
             return _error(f"unknown run '{run_id}'")
         store.ledger(run_id, {"event": "resumed", "released": released})
-        _workspaces[run_id] = store.workspace
+        _remember(run_id, store.workspace)
         return {"ok": True, "released": released, **_brief_view(view)}
 
     @server.tool()

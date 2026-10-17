@@ -28,14 +28,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from agflow import frontmatter, paths
+from agflow import frontmatter, hookfile, paths
 from agflow.fsutil import atomic_write_text, backup, copy_tree, read_json, remove, timestamp, write_json
 from agflow.profiles import resolve_profile
 
 Scope = Literal["global", "workspace"]
 BEGIN = "<!-- agflow:begin (managed by `agflow install`; edit plugin/GEMINI.md instead) -->"
 END = "<!-- agflow:end -->"
-_BLOCK_RE = re.compile(re.escape("<!-- agflow:begin") + r".*?" + re.escape(END) + r"\n?", re.DOTALL)
+# matches the managed block in a GEMINI.md (public: `fixes` strips it when it moves the master prompt)
+BLOCK_RE = re.compile(re.escape("<!-- agflow:begin") + r".*?" + re.escape(END) + r"\n?", re.DOTALL)
 MASTER_RULE = "agflow-master.md"
 
 
@@ -80,8 +81,10 @@ def format_command(parts: list[str], *, windows: bool | None = None) -> str:
 
     POSIX: shlex quoting. Windows: `shlex` single quotes are invalid there, so an exe path without
     spaces is used as-is; a path with spaces becomes bare `agflow` when that name resolves to the same
-    executable on PATH (quote-free, so it works in cmd.exe and PowerShell alike); otherwise the
-    Windows (double-quote) convention is used.
+    executable on PATH (quote-free, so it works in cmd.exe and PowerShell alike), else its 8.3 short path when
+    the volume has one (also quote-free); only then the Windows (double-quote) convention. Quotes are the
+    last resort because the hook runner hands the line to `cmd /c` as one quoted argument, which cmd.exe
+    does not unquote the way a person typing it would.
     """
     windows = os.name == "nt" if windows is None else windows
     if not windows:
@@ -91,7 +94,25 @@ def format_command(parts: list[str], *, windows: bool | None = None) -> str:
         on_path = shutil.which("agflow")
         if on_path and _same_file(on_path, exe):
             return subprocess.list2cmdline(["agflow", *rest])
+        short = _windows_short_path(exe)
+        if short and " " not in short:
+            return subprocess.list2cmdline([short, *rest])
     return subprocess.list2cmdline(parts)
+
+
+def _windows_short_path(path: str) -> str | None:
+    """The 8.3 name of an existing file (``C:\\Users\\KOOSHA~1\\...``), or ``None`` (not Windows, no such file, or
+    the volume does not create short names)."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(path, buffer, len(buffer))  # type: ignore[attr-defined]
+    except (OSError, AttributeError, ValueError):
+        return None
+    return buffer.value if 0 < n < len(buffer) else None
 
 
 def _same_file(a: str, b: str) -> bool:
@@ -101,14 +122,16 @@ def _same_file(a: str, b: str) -> bool:
         return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
-def _manifest_path(scope: Scope, workspace: Path | None) -> Path:
+def manifest_path(scope: Scope, workspace: Path | None) -> Path:
+    """The install manifest of a scope (public: ``fixes`` and doctor guidance read it)."""
     if scope == "global":
         return paths.global_state_dir() / "install.json"
     assert workspace is not None
     return paths.workspace_state_dir(workspace) / "install.json"
 
 
-def _plugin_target(scope: Scope, workspace: Path | None) -> Path:
+def plugin_target(scope: Scope, workspace: Path | None) -> Path:
+    """Where the agflow plugin lives for a scope (public: ``fixes`` compares installed copies against it)."""
     if scope == "global":
         return paths.global_layout().plugins_dir / paths.PLUGIN_NAME  # type: ignore[operator]
     assert workspace is not None
@@ -121,7 +144,7 @@ def installed_copies(workspace: Path | None) -> dict[str, Path]:
     for scope in ("global", "workspace"):
         if scope == "workspace" and workspace is None:
             continue
-        target = _plugin_target(scope, workspace)  # type: ignore[arg-type]
+        target = plugin_target(scope, workspace)  # type: ignore[arg-type]
         if (target / "plugin.json").is_file():
             out[scope] = target
     return out
@@ -144,8 +167,8 @@ def install(scope: Scope, workspace: Path | None = None, *, source: Path | None 
         raise InstallError(f"{src} is not a plugin (missing plugin.json)")
     if link and profile:  # refuse before anything is touched
         raise InstallError("--link cannot be combined with --profile (a link installs everything)")
-    target = _plugin_target(scope, workspace)
-    manifest_file = _manifest_path(scope, workspace)
+    target = plugin_target(scope, workspace)
+    manifest_file = manifest_path(scope, workspace)
     plan = Plan(scope=scope, target=target, manifest=manifest_file)
     plan.actions += recover_interrupted(scope, workspace, dry_run=dry_run)
     manifest: dict[str, Any] = read_json(manifest_file, None) or {
@@ -192,7 +215,7 @@ def install(scope: Scope, workspace: Path | None = None, *, source: Path | None 
                             f"{len(selection['agents'])} agents")
 
     # 2. master prompt
-    gemini_src = src / "GEMINI.md"
+    gemini_src = paths.plugin_layout(src).gemini_md
     if with_gemini_md and gemini_src.is_file():
         master = gemini_src.read_text(encoding="utf-8").strip() + "\n"
         if scope == "global":
@@ -202,7 +225,7 @@ def install(scope: Scope, workspace: Path | None = None, *, source: Path | None 
             record_write(rule)
             plan.actions.append(f"write    {rule} (always_on)")
             if not dry_run:
-                atomic_write_text(rule, _master_rule(master))
+                atomic_write_text(rule, master_rule(master))
 
     persist()
     plan.actions.append(f"manifest {manifest_file}")
@@ -228,7 +251,7 @@ def _replace_plugin(src: Path, target: Path, state_dir: Path, *, link: bool, sel
             stage.symlink_to(src, target_is_directory=True)
         else:
             copy_tree(src, stage)
-            (stage / "GEMINI.md").unlink(missing_ok=True)  # installed separately
+            paths.plugin_layout(stage).gemini_md.unlink(missing_ok=True)  # installed separately
             _filter_to_profile(stage, selection, plan)
             _wire_commands(stage, with_hooks, plan)
     except BaseException:
@@ -268,10 +291,10 @@ def recover_interrupted(scope: Scope, workspace: Path | None = None, *, dry_run:
     * a ``*-old`` folder next to a live plugin: the swap completed, only the cleanup was missed -> delete it;
     * a ``*-new`` folder: an unfinished build -> delete it.
     """
-    tmp_root = paths.install_tmp_dir(_manifest_path(scope, workspace).parent)
+    tmp_root = paths.install_tmp_dir(manifest_path(scope, workspace).parent)
     if not tmp_root.is_dir():
         return []
-    target = _plugin_target(scope, workspace)
+    target = plugin_target(scope, workspace)
     actions: list[str] = []
     entries = sorted(tmp_root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)  # newest first
     for entry in entries:
@@ -293,38 +316,48 @@ def recover_interrupted(scope: Scope, workspace: Path | None = None, *, dry_run:
     return actions
 
 
-def _master_rule(master: str) -> str:
+def master_rule(master: str) -> str:
+    """The master prompt as an ``always_on`` rule file (workspace installs, and the fix that moves it there)."""
     return frontmatter.dump(
         {"trigger": "always_on",
          "description": "agflow master operating prompt (Expert Senior Workflows Manager)"}, master)
+
+
+def _read_keeping_newlines(path: Path) -> tuple[str, str]:
+    """The text of a user's file with LF line ends, and the newline it really uses (CRLF if it has any).
+
+    Reading in text mode would turn a Windows file's CRLF into LF and every later write would keep that: the whole
+    file would change line endings just because agflow merged a block into it, and uninstall could not give it back."""
+    raw = path.read_bytes().decode("utf-8")
+    return raw.replace("\r\n", "\n"), "\r\n" if "\r\n" in raw else "\n"
 
 
 def _install_global_gemini_md(master: str, manifest: dict[str, Any], plan: Plan, record_write: Any,
                               dry_run: bool) -> None:
     gpath = paths.global_layout().gemini_md
     assert gpath is not None
-    existing = gpath.read_text(encoding="utf-8") if gpath.exists() else ""
-    user_part = _BLOCK_RE.sub("", existing).rstrip()
+    existing, newline = _read_keeping_newlines(gpath) if gpath.exists() else ("", "\n")
+    user_part = BLOCK_RE.sub("", existing).rstrip()
     block = f"{BEGIN}\n{master}{END}\n"
     combined = (user_part + "\n\n" + block) if user_part else block
     if len(combined) > paths.GEMINI_MD_CHAR_LIMIT:
         # Too big to share GEMINI.md with the user's rules: ship it as an always_on plugin rule instead.
-        rule = _plugin_target("global", None) / "rules" / MASTER_RULE
+        rule = paths.plugin_layout(plugin_target("global", None)).rules_dir / MASTER_RULE
         plan.warnings.append(
             f"~/.gemini/GEMINI.md would be {len(combined)} chars (> {paths.GEMINI_MD_CHAR_LIMIT}); installed the "
             f"master prompt as plugin rule {rule} instead. Trim your GEMINI.md and re-run to merge it.")
         plan.actions.append(f"write    {rule} (always_on fallback)")
         if not dry_run:
-            atomic_write_text(rule, _master_rule(master))
-        if existing != _BLOCK_RE.sub("", existing) and not dry_run:
-            atomic_write_text(gpath, user_part + "\n" if user_part else "")
+            atomic_write_text(rule, master_rule(master))
+        if existing != BLOCK_RE.sub("", existing) and not dry_run:
+            atomic_write_text(gpath, (user_part + "\n" if user_part else "").replace("\n", newline))
         return
     if str(gpath) not in manifest["managed_blocks"]:  # before record_write: it persists the manifest
         manifest["managed_blocks"].append(str(gpath))
     record_write(gpath)
     plan.actions.append(f"merge    {gpath} (managed block, {len(combined)} chars)")
     if not dry_run:
-        atomic_write_text(gpath, combined)
+        atomic_write_text(gpath, combined.replace("\n", newline))
 
 
 def _filter_to_profile(target: Path, selection: dict[str, list[str]] | None, plan: Plan) -> None:
@@ -340,7 +373,7 @@ def _filter_to_profile(target: Path, selection: dict[str, list[str]] | None, pla
             if name not in keep:
                 remove(entry)
                 plan.actions.append(f"skip     {kind[:-1]} {name} (not in profile)")
-    _prune_agent_rosters(target / "agents")
+    _prune_agent_rosters(paths.plugin_layout(target).agents_dir)
     _drop_unrunnable_graphs(target, selection, plan)
 
 
@@ -382,7 +415,8 @@ def _prune_agent_rosters(agents_dir: Path) -> None:
 
 def _wire_commands(target: Path, with_hooks: bool, plan: Plan) -> None:
     cmd = agflow_command()
-    mcp_file = target / "mcp_config.json"
+    layout = paths.plugin_layout(target)
+    mcp_file = layout.mcp_file
     if mcp_file.is_file():
         data = read_json(mcp_file, {}) or {}
         server = data.setdefault("mcpServers", {}).setdefault("agflow", {})
@@ -390,35 +424,35 @@ def _wire_commands(target: Path, with_hooks: bool, plan: Plan) -> None:
         server["args"] = [*cmd[1:], "mcp", "serve"]
         write_json(mcp_file, data)
         plan.actions.append(f"wire     MCP server -> {format_command([*cmd, 'mcp', 'serve'])}")
-    hooks_file = target / "hooks.json"
+    hooks_file = layout.hooks_file
     if not with_hooks:
         hooks_file.unlink(missing_ok=True)
         plan.actions.append("skip     hooks (--no-hooks)")
         return
     if hooks_file.is_file():
         data = read_json(hooks_file, {}) or {}
-        for entries in (data.get("hooks") or {}).values():
-            for entry in entries:
-                parts = shlex.split(entry.get("command", ""))
-                if parts and parts[0] == "agflow":
-                    entry["command"] = format_command([*cmd, *parts[1:]])
+        for ref in hookfile.handlers(data):
+            parts = shlex.split(str(ref.handler.get("command", "")))
+            if parts and parts[0] == "agflow":
+                ref.handler["command"] = hookfile.fail_open(format_command([*cmd, *parts[1:]]))
         write_json(hooks_file, data)
-        plan.actions.append(f"wire     hooks -> {format_command([*cmd, 'hook'])} <event>")
+        plan.actions.append(f"wire     hooks -> {format_command([*cmd, 'hook'])} <event> (fails open)")
 
 
 def uninstall(scope: Scope, workspace: Path | None = None, *, dry_run: bool = False) -> Plan:
-    manifest_file = _manifest_path(scope, workspace)
+    manifest_file = manifest_path(scope, workspace)
     manifest = read_json(manifest_file, None)
     if not manifest:
         raise InstallError(f"no agflow install found for scope {scope} ({manifest_file})")
-    plan = Plan(scope=scope, target=_plugin_target(scope, workspace), manifest=manifest_file)
+    plan = Plan(scope=scope, target=plugin_target(scope, workspace), manifest=manifest_file)
     plan.actions += recover_interrupted(scope, workspace, dry_run=dry_run)  # an interrupted install first
     for p in manifest.get("managed_blocks", []):
         path = Path(p)
         plan.actions.append(f"unmerge  {path}")
         if not dry_run and path.exists():
-            text = _BLOCK_RE.sub("", path.read_text(encoding="utf-8")).rstrip()
-            atomic_write_text(path, text + "\n" if text else "")
+            text, newline = _read_keeping_newlines(path)
+            text = BLOCK_RE.sub("", text).rstrip()
+            atomic_write_text(path, (text + "\n" if text else "").replace("\n", newline))
     managed = set(manifest.get("managed_blocks", []))
     for p in manifest.get("created", []):
         path = Path(p)
@@ -442,7 +476,7 @@ def uninstall(scope: Scope, workspace: Path | None = None, *, dry_run: bool = Fa
             elif saved_path.exists():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(saved_path, path)
-    fallback = _plugin_target(scope, workspace) / "rules" / MASTER_RULE
+    fallback = paths.plugin_layout(plugin_target(scope, workspace)).rules_dir / MASTER_RULE
     if not dry_run:
         fallback.unlink(missing_ok=True)
         manifest_file.unlink(missing_ok=True)
@@ -455,11 +489,11 @@ def status(workspace: Path | None) -> dict[str, Any]:
     for scope in ("global", "workspace"):
         if scope == "workspace" and workspace is None:
             continue
-        m = read_json(_manifest_path(scope, workspace), None)  # type: ignore[arg-type]
-        out[scope] = {"installed": bool(m), "target": str(_plugin_target(scope, workspace)),  # type: ignore[arg-type]
+        m = read_json(manifest_path(scope, workspace), None)  # type: ignore[arg-type]
+        out[scope] = {"installed": bool(m), "target": str(plugin_target(scope, workspace)),  # type: ignore[arg-type]
                       **({"profile": m.get("profile"), "source": m.get("source")} if m else {})}
     return out
 
 
 def manifest_json(scope: Scope, workspace: Path | None) -> str:
-    return json.dumps(read_json(_manifest_path(scope, workspace), {}), indent=2)
+    return json.dumps(read_json(manifest_path(scope, workspace), {}), indent=2)

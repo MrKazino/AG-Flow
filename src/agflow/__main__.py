@@ -10,11 +10,11 @@ def main() -> None:
         with contextlib.suppress(AttributeError, ValueError):
             stream.reconfigure(errors="replace")  # type: ignore[union-attr]
     if len(sys.argv) == 3 and sys.argv[1] == "hook":
-        from agflow.hooks import HANDLERS, run_hook
+        from agflow.hooks import HANDLERS
+        from agflow.hooks import main as hook_main
 
         if sys.argv[2] in HANDLERS:
-            sys.stdout.write(run_hook(sys.argv[2]) + "\n")
-            return
+            sys.exit(hook_main(sys.argv[2]))  # always 0 with one JSON line on stdout; see hooks.main
     from agflow.cli import main as cli_main
 
     cli_main()

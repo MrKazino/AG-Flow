@@ -1,10 +1,10 @@
 """easy-installer.bat (batch + sh polyglot) and its cross-platform helper scripts/easy_install.py."""
 
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
-import time
 
 import pytest
 
@@ -64,8 +64,9 @@ def test_find_wheel_and_requirement(tmp_path):
     old = tmp_path / "agflow-0.0.9-py3-none-any.whl"
     new = tmp_path / "agflow-0.1.0-py3-none-any.whl"
     old.write_text("x")
-    time.sleep(0.01)
     new.write_text("x")
+    os.utime(old, (1_000_000_000, 1_000_000_000))  # explicit times: the order must not depend on the clock's resolution
+    os.utime(new, (2_000_000_000, 2_000_000_000))
     assert easy.find_wheel(tmp_path, "0.1.0") == new
     with pytest.raises(easy.InstallFailed):
         easy.find_wheel(tmp_path, "9.9.9")
@@ -207,7 +208,6 @@ def test_run_stream_echoes_and_returns_output(capsys):
 # --- F4: the uv bootstrap is pinned and checksum-verified, never piped into a shell ----------------------------------
 
 import hashlib  # noqa: E402
-import os  # noqa: E402
 
 SCRIPTS = REPO / "scripts"
 PIN = SCRIPTS / "uv-pin.env"
@@ -344,3 +344,141 @@ def test_powershell_bootstrap_uses_the_pinned_checksum_by_default(tmp_path):
 def test_powershell_bootstrap_version_override_requires_a_checksum(tmp_path):
     proc, marker = ps(tmp_path, url_hash="pin", extra_env={"AGFLOW_UV_VERSION": "9.9.9"})
     assert proc.returncode != 0 and not marker.exists() and "AGFLOW_UV_INSTALLER_SHA256" in proc.stderr
+
+
+# --- F13: no answer means no, not yes ---------------------------------------------------------
+
+
+class _Stdin:
+    def __init__(self, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def test_confirm_without_a_terminal_and_without_yes_aborts_with_guidance(monkeypatch):
+    monkeypatch.setattr(easy.sys, "stdin", _Stdin(False))
+    with pytest.raises(easy.InstallFailed, match=r"--yes"):
+        easy.confirm("Stop these agflow processes now?", assume_yes=False)
+
+
+def test_confirm_with_yes_proceeds_even_without_a_terminal(monkeypatch):
+    monkeypatch.setattr(easy.sys, "stdin", _Stdin(False))
+    assert easy.confirm("Install the plugin?", assume_yes=True) is True
+
+
+@pytest.mark.parametrize("typed, expected", [("", True), ("y", True), ("Yes", True), ("n", False), ("no", False)])
+def test_confirm_with_a_terminal_asks(monkeypatch, typed, expected):
+    monkeypatch.setattr(easy.sys, "stdin", _Stdin(True))
+    monkeypatch.setattr("builtins.input", lambda prompt="": typed)
+    assert easy.confirm("Proceed?", assume_yes=False) is expected
+
+
+needs_sh = pytest.mark.skipif(not (shutil.which("sh") and shutil.which("curl")), reason="needs sh and curl")
+
+
+def _run_sh_half(tmp_path, *args):
+    """Run the POSIX half of easy-installer.bat with no uv on PATH and a fake, checksum-matching uv installer."""
+    fake = tmp_path / "fake-installer.sh"
+    fake.write_text('#!/bin/sh\necho ran > "$MARKER"\n', encoding="utf-8", newline="\n")
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    sh_dir = os.path.dirname(shutil.which("sh"))
+    env = {"PATH": os.pathsep.join([sh_dir, os.path.dirname(shutil.which("curl"))]), "HOME": str(home),
+           "USERPROFILE": str(home), "MARKER": str(tmp_path / "ran.marker"),
+           "AGFLOW_UV_INSTALLER_URL": fake.as_uri(), "AGFLOW_UV_VERSION": "9.9.9",
+           "AGFLOW_UV_INSTALLER_SHA256": hashlib.sha256(fake.read_bytes()).hexdigest()}
+    if os.name == "nt":
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    proc = subprocess.run(["sh", str(BAT), *args], capture_output=True, text=True, env=env, cwd=REPO,
+                          stdin=subprocess.DEVNULL, timeout=120)
+    return proc, tmp_path / "ran.marker"
+
+
+@needs_sh
+def test_sh_half_refuses_to_install_uv_without_yes_when_not_interactive(tmp_path):
+    proc, marker = _run_sh_half(tmp_path)
+    assert proc.returncode != 0 and not marker.exists(), "nothing may be downloaded or run unattended without consent"
+    assert "--yes" in proc.stderr
+
+
+@needs_sh
+def test_sh_half_installs_uv_when_yes_is_given(tmp_path):
+    proc, marker = _run_sh_half(tmp_path, "--yes")
+    assert marker.exists(), proc.stderr + proc.stdout  # consent given: the verified installer ran
+
+
+# --- F12: only agflow's own processes are stopped, and only the ones that were listed ----------
+
+
+@pytest.fixture
+def tool(tmp_path):
+    env, exe = tmp_path / "uv" / "tools" / "agflow", tmp_path / "bin" / "agflow.exe"
+    return env, exe
+
+
+def test_processes_running_from_the_tool_env_or_the_launcher_are_owned(tool):
+    env, exe = tool
+    assert easy.owned_by_tool({"pid": 1, "path": str(env / "Scripts" / "python.exe")}, env, exe)
+    assert easy.owned_by_tool({"pid": 2, "path": str(exe)}, env, exe)
+
+
+def test_an_editor_or_terminal_that_merely_mentions_the_folder_is_not_owned(tool):
+    env, exe = tool
+    editor = {"pid": 3, "path": str(env.parent.parent / "Code" / "Code.exe"), "cmd": f'"Code.exe" "{env}"'}
+    terminal = {"pid": 4, "path": str(env.parent.parent / "wt.exe"), "cmd": f"pwsh -NoExit -WorkingDirectory {env}"}
+    assert not easy.owned_by_tool(editor, env, exe) and not easy.owned_by_tool(terminal, env, exe)
+
+
+def test_a_sibling_folder_sharing_the_name_prefix_is_not_owned(tool):
+    env, exe = tool
+    assert not easy.owned_by_tool({"pid": 5, "path": str(env.parent / "agflow-other" / "python.exe")}, env, exe)
+    assert not easy.owned_by_tool({"pid": 6}, env, exe) and not easy.owned_by_tool({"pid": 7, "path": ""}, env, exe)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows paths are case-insensitive")
+def test_owned_matching_ignores_case_on_windows(tool):
+    env, exe = tool
+    assert easy.owned_by_tool({"pid": 1, "path": str(env / "Scripts" / "python.exe").upper()}, env, exe)
+
+
+def test_the_process_query_no_longer_matches_on_the_command_line():
+    assert "CommandLine.IndexOf" not in easy._PS_FIND, "a command line that mentions the folder proves nothing"
+    assert "CreationDate" in easy._PS_FIND, "the creation time is recorded so the PID can be re-verified"
+
+
+def test_the_process_query_keeps_its_path_separator_guard():
+    """`...\agflow` must not match `...\agflow-other`: the query compares against the folder plus a backslash."""
+    assert r"TrimEnd('\') + '\'" in easy._PS_FIND
+
+
+def test_same_identity_needs_the_same_executable_and_start_time():
+    before = {"pid": 9, "path": r"C:\t\agflow\Scripts\python.exe", "created": "2026-10-10T08:00:00.0000000"}
+    assert easy.same_identity(before, dict(before))
+    assert not easy.same_identity(before, {**before, "created": "2026-10-10T08:05:00.0000000"})  # PID reused
+    assert not easy.same_identity(before, {**before, "path": r"C:\Windows\notepad.exe"})
+    assert not easy.same_identity(before, None)  # already gone
+    assert not easy.same_identity({**before, "created": ""}, {**before, "created": ""})  # unverifiable: don't kill
+
+
+def test_stop_processes_kills_only_processes_whose_identity_is_unchanged(monkeypatch, capsys):
+    listed = [{"pid": 11, "path": "p1", "created": "t1"}, {"pid": 22, "path": "p2", "created": "t2"}]
+    monkeypatch.setattr(easy, "current_identities", lambda pids: {
+        11: {"pid": 11, "path": "p1", "created": "t1"},
+        22: {"pid": 22, "path": "p2", "created": "t2-later"}})  # PID 22 now belongs to a different process
+    monkeypatch.setattr(easy, "find_agflow_processes", lambda uv: [])
+    killed = []
+    monkeypatch.setattr(easy.subprocess, "run", lambda args, **kw: killed.append(list(args)))
+    easy.stop_processes("uv", listed, timeout=0.5)
+    assert len(killed) == 1 and "11" in killed[0] and "22" not in killed[0]
+    assert "PID 22" in capsys.readouterr().out
+
+
+def test_stop_processes_does_nothing_for_processes_that_already_exited(monkeypatch):
+    monkeypatch.setattr(easy, "current_identities", lambda pids: {})
+    monkeypatch.setattr(easy, "find_agflow_processes", lambda uv: [])
+    killed = []
+    monkeypatch.setattr(easy.subprocess, "run", lambda args, **kw: killed.append(args))
+    easy.stop_processes("uv", [{"pid": 5, "path": "p", "created": "t"}], timeout=0.5)
+    assert killed == []

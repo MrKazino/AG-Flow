@@ -74,6 +74,12 @@ def runs_dir(workspace: Path) -> Path:
     return workspace_state_dir(workspace) / "runs"
 
 
+# The status index of a workspace's runs, ``<runs>/.index.json``. Written by ``graph.store.RunStore``; read, without
+# loading the store, by the hook fast path (``hooks._no_active_run``): one definition so the two cannot drift apart.
+RUN_INDEX_FILE = ".index.json"
+RUN_INDEX_VERSION = 1
+
+
 @dataclass(frozen=True)
 class Layout:
     """Where each component type lives for one scope."""
@@ -180,6 +186,10 @@ def legacy_workspace_layout(workspace: Path) -> Layout:
 def agy_cli_dir() -> Path:
     """Antigravity CLI (agy) private config dir."""
     return gemini_dir() / "antigravity-cli"
+
+
+def agy_cli_mcp_file() -> Path:
+    return agy_cli_dir() / "mcp_config.json"
 
 
 # --- Gemini CLI (sync target) ---------------------------------------------------------------

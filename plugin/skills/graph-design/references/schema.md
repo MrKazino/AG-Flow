@@ -23,7 +23,7 @@ nodes:
       Write a spec for: {{ inputs.feature }}
     outputs: ["docs/specs/{{ run.id }}.md"]
     acceptance: ["Spec has testable acceptance criteria"]
-    depends_on: []
+    depends_on: []              # node ids, each at most once (a repeated id is rejected)
     when: null                  # Jinja expression; falsy => node skipped (downstream still runs)
     retries: null               # override defaults.retries
     timeout_min: null
@@ -39,6 +39,11 @@ nodes:
     prompt: "Ship it?"          # question shown to the user
     depends_on: [review-gate]
 ```
+
+Template notes: `inputs.name` is the input called `name` even when that name is also a dict method (`items`, `keys`,
+`values`, `get`, ...); the method is only used when there is no such input. Name inputs like node ids
+(`^[a-z][a-z0-9_-]{0,63}$`): `agflow doctor` warns about any other name (`graph.input.name`) and agflow 0.4.0 will reject
+it. Use `_` rather than `-`: `{{ inputs.bug-id }}` subtracts, only `inputs['bug-id']` reads the input.
 
 ## Node result statuses (reported by the orchestrator)
 | status | meaning | engine behaviour |
