@@ -1,0 +1,457 @@
+{
+  "schema": 1,
+  "_about": "What AG-Flow was verified against. 'requires' lists names AG-Flow depends on; 'verified' is a fingerprint (hashes and names only) of the Antigravity it was last checked against. Refresh with scripts/make_compat_baseline.py.",
+  "tested_antigravity": [
+    "1.3.3"
+  ],
+  "verified": {
+    "agy_version": "1.3.3",
+    "skills_root": "~/.gemini/antigravity/builtin/skills",
+    "doc_hashes": {
+      "agy-customizations/docs/hooks.md": "79c917a0ea47c1abc3bfe2e97371950d42d981fb648af2e2099c121652bc771b",
+      "agy-customizations/docs/plugins.md": "481c2612f4729fb4fab600aebc5eb0d4eda6e00d5b45084bc7523718514bf19e",
+      "agy-customizations/docs/json_configs.md": "c15221be619c411058179fb1da85195894e33502dd074eba64e6a609572488b6",
+      "agy-customizations/docs/mcp_servers.md": "7e34d5924e3574a60b75e8972d121de6923a3e7b9248c3c95434f26823fe18cf",
+      "agy-customizations/docs/skills.md": "c4eba3bc9a8775928704d1b7feede20871b25f8d427c6cd6757b7edd54b3ae60",
+      "agy-customizations/docs/rules.md": "063ab1c908fae4798d9a1f5981ed57b7570a860ceb0e5850816aefddf72b8b54",
+      "plugin/SKILL.md": "d93af06b31a0d21a72b1245453ef8295e32fea189cc16405ea30f00309044258",
+      "ui-plugin-navigation/SKILL.md": "cf7d6b03fcf404b31e5f3f2836c39899f77c4c04e698bd112d3da207ee86b867",
+      "automation/SKILL.md": "62cae540c3cf7b8104e4378729bac9aab7696e766e5fc8edaf581891ab9a5053"
+    },
+    "markers": {
+      "agy-customizations/docs/hooks.md": {
+        "fields": [
+          "PostInvocation",
+          "PostToolUse",
+          "PreInvocation",
+          "PreToolUse",
+          "Stop",
+          "command",
+          "decision",
+          "enabled",
+          "injectSteps",
+          "overwrite",
+          "permissionOverrides",
+          "reason",
+          "terminationBehavior",
+          "timeout",
+          "type"
+        ],
+        "table_keys": [
+          "PostInvocation",
+          "PostToolUse",
+          "PreInvocation",
+          "PreToolUse",
+          "Stop"
+        ],
+        "values": [
+          "allow",
+          "ask",
+          "deny",
+          "force_ask",
+          "force_continue",
+          "terminate"
+        ],
+        "json_keys": [
+          "CommandLine",
+          "PostToolUse",
+          "PreInvocation",
+          "PreToolUse",
+          "args",
+          "artifactDirectoryPath",
+          "command",
+          "conversationId",
+          "decision",
+          "enabled",
+          "ephemeralMessage",
+          "error",
+          "executionNum",
+          "fullyIdle",
+          "hooks",
+          "initialNumSteps",
+          "injectSteps",
+          "invocationNum",
+          "matcher",
+          "modelName",
+          "name",
+          "overwrite",
+          "permissionOverrides",
+          "reason",
+          "reminder",
+          "stepIdx",
+          "terminationBehavior",
+          "terminationReason",
+          "timeout",
+          "toolCall",
+          "transcriptPath",
+          "type",
+          "workspacePaths"
+        ],
+        "code_terms": [
+          "CORTEX_STEP_TYPE_",
+          "PostInvocation",
+          "PostToolUse",
+          "PreInvocation",
+          "PreToolUse",
+          "Stop",
+          "allow",
+          "ask",
+          "browser_",
+          "command",
+          "continue",
+          "conversationId",
+          "decision",
+          "deny",
+          "enabled",
+          "false",
+          "force_ask",
+          "force_continue",
+          "hooks",
+          "hooks.json",
+          "injectSteps",
+          "matcher",
+          "overwrite",
+          "permissionOverrides",
+          "reason",
+          "run_command",
+          "stdin",
+          "stepIdx",
+          "terminate",
+          "terminationBehavior",
+          "timeout",
+          "true",
+          "type"
+        ],
+        "layouts": [
+          "PostInvocation=flat",
+          "PostToolUse=grouped",
+          "PreInvocation=flat",
+          "PreToolUse=grouped",
+          "Stop=flat"
+        ],
+        "limits": [
+          "30"
+        ],
+        "tree_files": []
+      },
+      "agy-customizations/docs/plugins.md": {
+        "fields": [
+          "name"
+        ],
+        "table_keys": [],
+        "values": [],
+        "json_keys": [
+          "enabled",
+          "name",
+          "plugins"
+        ],
+        "code_terms": [
+          "AGENTS.md",
+          "GEMINI.md",
+          "config.json",
+          "name",
+          "plugin.json",
+          "plugins",
+          "plugins.json"
+        ],
+        "layouts": [],
+        "limits": [],
+        "tree_files": [
+          "<skill_name>/",
+          "AGENTS.md",
+          "SKILL.md",
+          "hooks.json",
+          "mcp_config.json",
+          "plugin.json",
+          "rules/",
+          "skills/"
+        ]
+      },
+      "agy-customizations/docs/json_configs.md": {
+        "fields": [
+          "entries",
+          "inherits"
+        ],
+        "table_keys": [
+          "exclude",
+          "include_only",
+          "path"
+        ],
+        "values": [],
+        "json_keys": [
+          "entries",
+          "exclude",
+          "include_only",
+          "inherits",
+          "path"
+        ],
+        "code_terms": [
+          "entries",
+          "exclude",
+          "include_only",
+          "inherits",
+          "path",
+          "plugins.json",
+          "skills.json",
+          "skills_paths"
+        ],
+        "layouts": [],
+        "limits": [],
+        "tree_files": []
+      },
+      "agy-customizations/docs/mcp_servers.md": {
+        "fields": [
+          "args",
+          "command",
+          "env",
+          "url"
+        ],
+        "table_keys": [],
+        "values": [],
+        "json_keys": [
+          "DB_READONLY",
+          "args",
+          "command",
+          "env",
+          "mcpServers",
+          "url"
+        ],
+        "code_terms": [
+          "args",
+          "command",
+          "env",
+          "mcp-remote",
+          "mcp_config.json",
+          "node",
+          "python3",
+          "serverUrl",
+          "url"
+        ],
+        "layouts": [],
+        "limits": [],
+        "tree_files": []
+      },
+      "agy-customizations/docs/skills.md": {
+        "fields": [
+          "description",
+          "name"
+        ],
+        "table_keys": [],
+        "values": [],
+        "json_keys": [],
+        "code_terms": [
+          "SKILL.md",
+          "description",
+          "name"
+        ],
+        "layouts": [],
+        "limits": [],
+        "tree_files": [
+          "SKILL.md",
+          "examples/",
+          "references/",
+          "resources/",
+          "scripts/"
+        ]
+      },
+      "agy-customizations/docs/rules.md": {
+        "fields": [],
+        "table_keys": [],
+        "values": [],
+        "json_keys": [],
+        "code_terms": [
+          "AGENTS.md",
+          "GEMINI.md",
+          "defaultRulesBudget"
+        ],
+        "layouts": [],
+        "limits": [
+          "20,000",
+          "24 KB",
+          "24,000"
+        ],
+        "tree_files": []
+      },
+      "plugin/SKILL.md": {
+        "fields": [],
+        "table_keys": [
+          "description",
+          "disabled",
+          "displayName",
+          "logo",
+          "name",
+          "suggestedPrompts",
+          "version"
+        ],
+        "values": [],
+        "json_keys": [
+          "description",
+          "enabled",
+          "id",
+          "logo",
+          "name",
+          "pluginId",
+          "plugins",
+          "suggestedPrompts",
+          "userConfig",
+          "workspaceUris"
+        ],
+        "code_terms": [
+          "GetAllPlugins",
+          "SKILL.md",
+          "ask_question",
+          "author",
+          "config.json",
+          "data-tools",
+          "db",
+          "description",
+          "dir",
+          "disabled",
+          "displayName",
+          "generate_image",
+          "homepage",
+          "jq",
+          "logo",
+          "lsrpc",
+          "mcp_config.json",
+          "name",
+          "plugin.json",
+          "search",
+          "suggestedPrompts",
+          "userSettings",
+          "version",
+          "workspaceUris"
+        ],
+        "layouts": [],
+        "limits": [],
+        "tree_files": [
+          "README.md",
+          "agents/<agent>.md",
+          "assets/logo.svg",
+          "hooks.json",
+          "mcp_config.json",
+          "plugin.json",
+          "rules/AGENTS.md",
+          "skills/<skill>/SKILL.md"
+        ]
+      },
+      "ui-plugin-navigation/SKILL.md": {
+        "fields": [],
+        "table_keys": [],
+        "values": [],
+        "json_keys": [],
+        "code_terms": [
+          "description",
+          "display_name",
+          "has_web_ui",
+          "path",
+          "sidecar.json",
+          "sidecar_id",
+          "title",
+          "ui_config.views"
+        ],
+        "layouts": [],
+        "limits": [],
+        "tree_files": []
+      },
+      "automation/SKILL.md": {
+        "fields": [
+          "access_grants",
+          "workspace_uris"
+        ],
+        "table_keys": [],
+        "values": [],
+        "json_keys": [
+          "access_grants",
+          "agent_permissions",
+          "args",
+          "builtin",
+          "description",
+          "display_name",
+          "restart_policy"
+        ],
+        "code_terms": [
+          "Daily",
+          "Friday",
+          "Hourly",
+          "Monday",
+          "PST",
+          "SKILL.md",
+          "Weekly",
+          "access_grants",
+          "agent_permissions",
+          "args",
+          "ask_question",
+          "daily-pr-check",
+          "display_name",
+          "kebab-case",
+          "restart_policy",
+          "sidecar.json",
+          "skill_search",
+          "toolAction",
+          "toolSummary",
+          "user_config.json",
+          "view_file",
+          "workspace_uris",
+          "write_to_file"
+        ],
+        "layouts": [],
+        "limits": [],
+        "tree_files": []
+      }
+    },
+    "builtin_skills": [
+      "agy-customizations",
+      "antigravity_guide",
+      "automation",
+      "generative_ui",
+      "migrate-workflows",
+      "permissioned-github",
+      "plugin",
+      "ui-plugin-navigation"
+    ],
+    "config_keys": [
+      "plugins",
+      "sidecars",
+      "userSettings"
+    ],
+    "gemini_cli_version": null,
+    "sdk_version": "0.1.20"
+  },
+  "requires": [
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "table_keys", "value": "PreToolUse", "component": "hooks", "why": "agflow registers a command hook on this event"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "table_keys", "value": "PostToolUse", "component": "hooks", "why": "agflow registers a command hook on this event"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "table_keys", "value": "Stop", "component": "hooks", "why": "agflow registers a command hook on this event"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "layouts", "value": "PreToolUse=grouped", "component": "hooks.json layout", "why": "plugin/hooks.json wraps these handlers in matcher groups"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "layouts", "value": "PostToolUse=grouped", "component": "hooks.json layout", "why": "plugin/hooks.json wraps these handlers in matcher groups"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "layouts", "value": "Stop=flat", "component": "hooks.json layout", "why": "plugin/hooks.json lists these handlers directly"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "values", "value": "deny", "component": "hooks", "why": "the pre-tool hook blocks dangerous commands with this decision"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "values", "value": "ask", "component": "hooks", "why": "the pre-tool hook asks before risky commands with this decision"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "code_terms", "value": "continue", "component": "hooks", "why": "the Stop hook keeps an unfinished run going with this decision"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "fields", "value": "decision", "component": "hooks", "why": "every hook answer carries it"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "fields", "value": "reason", "component": "hooks", "why": "hook answers explain themselves with it"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "fields", "value": "command", "component": "hooks", "why": "the handler field plugin/hooks.json sets"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "fields", "value": "timeout", "component": "hooks", "why": "the handler field plugin/hooks.json sets"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "fields", "value": "type", "component": "hooks", "why": "the handler field plugin/hooks.json sets"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "json_keys", "value": "toolCall", "component": "hooks", "why": "the payload key that holds the tool call"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "json_keys", "value": "workspacePaths", "component": "hooks", "why": "the payload key that names the workspace"},
+    {"doc": "agy-customizations/docs/hooks.md", "kind": "json_keys", "value": "terminationReason", "component": "hooks", "why": "the Stop payload key the Stop hook reads"},
+    {"doc": "plugin/SKILL.md", "kind": "table_keys", "value": "name", "component": "plugin manifest", "why": "plugin.json field"},
+    {"doc": "plugin/SKILL.md", "kind": "table_keys", "value": "description", "component": "plugin manifest", "why": "plugin.json field"},
+    {"doc": "plugin/SKILL.md", "kind": "table_keys", "value": "displayName", "component": "plugin manifest", "why": "plugin.json field"},
+    {"doc": "plugin/SKILL.md", "kind": "table_keys", "value": "suggestedPrompts", "component": "plugin manifest", "why": "plugin.json field"},
+    {"doc": "plugin/SKILL.md", "kind": "table_keys", "value": "version", "component": "plugin manifest", "why": "plugin.json field"},
+    {"doc": "agy-customizations/docs/plugins.md", "kind": "tree_files", "value": "plugin.json", "component": "plugin layout", "why": "the manifest file name"},
+    {"doc": "agy-customizations/docs/plugins.md", "kind": "tree_files", "value": "hooks.json", "component": "plugin layout", "why": "the plugin hooks file name"},
+    {"doc": "agy-customizations/docs/plugins.md", "kind": "tree_files", "value": "mcp_config.json", "component": "plugin layout", "why": "the plugin MCP file name"},
+    {"doc": "agy-customizations/docs/plugins.md", "kind": "tree_files", "value": "skills/", "component": "plugin layout", "why": "the plugin skills folder"},
+    {"doc": "agy-customizations/docs/plugins.md", "kind": "tree_files", "value": "rules/", "component": "plugin layout", "why": "the plugin rules folder"},
+    {"doc": "agy-customizations/docs/mcp_servers.md", "kind": "fields", "value": "command", "component": "MCP config", "why": "the server entry field mcp_config.json sets"},
+    {"doc": "agy-customizations/docs/mcp_servers.md", "kind": "fields", "value": "args", "component": "MCP config", "why": "the server entry field mcp_config.json sets"},
+    {"doc": "agy-customizations/docs/mcp_servers.md", "kind": "json_keys", "value": "mcpServers", "component": "MCP config", "why": "the top-level key of mcp_config.json"},
+    {"doc": "agy-customizations/docs/skills.md", "kind": "fields", "value": "name", "component": "skills", "why": "required SKILL.md frontmatter"},
+    {"doc": "agy-customizations/docs/skills.md", "kind": "fields", "value": "description", "component": "skills", "why": "required SKILL.md frontmatter"},
+    {"doc": "agy-customizations/docs/rules.md", "kind": "code_terms", "value": "AGENTS.md", "component": "rules", "why": "a rule file name Antigravity loads"},
+    {"doc": "agy-customizations/docs/rules.md", "kind": "code_terms", "value": "GEMINI.md", "component": "rules", "why": "the rule file name AG-Flow manages"}
+  ]
+}

@@ -19,8 +19,8 @@ Procedure (follow the graph-run skill):
    verbatim) → parse each subagent's final JSON block → graph_report. Repeat until the run is not
    running.
 3. For human approval cards, ask me the question verbatim and report my answer.
-4. If anything is stuck twice, stop and show me the evidence and options.
-5. When the run ends, give me the walkthrough from graph_status(verbose=true): outcome, what each node
+4. If a report is rejected by the evidence check, dispatch the node again with the feedback instead of re-reporting. If anything is stuck twice, stop and show me the evidence and options.
+5. When the run ends, give me the walkthrough from graph_status (verbose): outcome, what each node
    did with evidence, artifacts, follow-ups and the report path.
 ```
 

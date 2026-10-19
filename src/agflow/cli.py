@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from pathlib import Path
@@ -12,7 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from agflow import __version__, frontmatter, paths
+from agflow import __version__, frontmatter, paths, platform_vocab
 from agflow.fsutil import atomic_write_text, read_yaml
 from agflow.inventory import Inventory
 from agflow.models import Kind, Level
@@ -27,9 +26,15 @@ rules_app = typer.Typer(no_args_is_help=True, help="Manage rules (and GEMINI.md)
 mcp_app = typer.Typer(no_args_is_help=True, help="Manage MCP servers; `agflow mcp serve` runs the orchestrator.")
 profile_app = typer.Typer(no_args_is_help=True, help="Workflow profiles (bundles of skills/agents/MCP).")
 graph_app = typer.Typer(no_args_is_help=True, help="Graph orchestration: validate, render, compile, run.")
-sync_app = typer.Typer(no_args_is_help=True, help="Share skills/MCP with other tools.")
+sync_app = typer.Typer(no_args_is_help=True,
+                       help="Keep AG-Flow in step with Antigravity; share skills/MCP with other tools.")
+update_app = typer.Typer(no_args_is_help=True,
+                         help="Check for, plan and apply AG-Flow updates (GitHub Releases; you approve each one).")
+improve_app = typer.Typer(no_args_is_help=True,
+                          help="What finished runs taught each workflow; proposed changes you approve one by one.")
 for sub, name in ((skills_app, "skills"), (agents_app, "agents"), (rules_app, "rules"), (mcp_app, "mcp"),
-                  (profile_app, "profile"), (graph_app, "graph"), (sync_app, "sync")):
+                  (profile_app, "profile"), (graph_app, "graph"), (sync_app, "sync"), (update_app, "update"),
+                  (improve_app, "improve")):
     app.add_typer(sub, name=name)
 
 # soft_wrap: never insert hard line breaks into paths (they broke copy-paste of Windows paths)
@@ -96,7 +101,7 @@ def doctor(
                                  extra_layouts=[paths.plugin_layout(path)])
     else:
         inv = Inventory.discover(ws_of(workspace), include_global=not no_global)
-    all_issues = validate_inventory(inv)
+    all_issues = validate_inventory(inv, probe_hooks=True)  # also runs agflow's installed hook commands once
     issues = [i for i in all_issues if not source or i.source in source]
     counts = summarize(issues)
     sources = by_source(issues)
@@ -134,7 +139,8 @@ def doctor(
             fail("--fix works on the installed setup (not with --path or --json); use `agflow fix --json` instead")
         result = _interactive_fix(ws_of(workspace), yes=yes)
         if result is not None:
-            issues = [i for i in validate_inventory(Inventory.discover(ws_of(workspace), include_global=not no_global))
+            issues = [i for i in validate_inventory(Inventory.discover(ws_of(workspace), include_global=not no_global),
+                                                    probe_hooks=True)
                       if not source or i.source in source]
             counts = summarize(issues)
     if counts["error"] or (strict and counts["warning"]):
@@ -205,7 +211,7 @@ def _interactive_fix(workspace: Path, *, yes: bool) -> Any:
 
     from agflow import fixes
 
-    plan = fixes.build_plan(workspace)
+    plan = fixes.build_plan(workspace, probe_hooks=True)
     console.rule("[bold]Fix")
     _print_plan(plan, show_manual=True)
     if not plan.fixes:
@@ -232,7 +238,7 @@ def _interactive_fix(workspace: Path, *, yes: bool) -> Any:
     if not selections:
         console.print("Nothing applied.")
         return None
-    result = fixes.apply(workspace, selections)
+    result = fixes.apply(workspace, selections, plan=plan)
     console.print()
     _print_result(result)
     return result
@@ -287,7 +293,7 @@ def fix_cmd(
         return
 
     ws = ws_of(workspace)
-    plan = fixes.build_plan(ws)
+    plan = fixes.build_plan(ws, probe_hooks=True)
     options: dict[str, str] = {}
     for item in option:
         fid, sep, opt = item.partition("=")
@@ -333,7 +339,7 @@ def fix_cmd(
                 console.print(f"  [dim]- {escape(change)}[/]")
     if not yes and not as_json and not typer.confirm(f"\nApply {len(selections)} fix(es)?", default=True):
         raise typer.Exit(1)
-    result = fixes.apply(ws, selections)
+    result = fixes.apply(ws, selections, plan=plan)
     if as_json:
         print_json(result.to_dict())
     else:
@@ -521,26 +527,33 @@ def migrate(
     dry_run: bool = typer.Option(False, "--dry-run"),
     no_global: bool = typer.Option(False, "--no-global"),
 ) -> None:
-    """Convert workflows to skills (workflows retire 2026-11-01) and move 1.x layouts to 2.x."""
+    """Convert workflows to skills (retired 2026-11-01) and move 1.x layouts to 2.x; `agflow fix --undo` reverts it."""
+    from agflow import fixes
     from agflow.migrate import migrate_all
 
-    report = migrate_all(ws_of(workspace), include_global=not no_global, dry_run=dry_run)
+    if dry_run:
+        report = migrate_all(ws_of(workspace), include_global=not no_global, dry_run=True)
+    else:
+        report = fixes.migrate_undoable(ws_of(workspace), include_global=not no_global)
     for a in report.actions:
         console.print(f"  {a}", markup=False, highlight=False)
     for c in report.conflicts:
         console.print(f"[yellow]conflict:[/] {c}")
     if not report.actions and not report.conflicts:
         console.print("[green]✓[/] nothing to migrate")
+    elif report.actions and not dry_run:
+        console.print("[dim]Undo with `agflow fix --undo`.[/]")
 
 
 @app.command()
 def hook(event: str = typer.Argument(..., help="pre-tool-use | post-tool-use | stop")) -> None:
     """Hook entry point used by hooks.json (reads JSON on stdin, writes a JSON decision)."""
-    from agflow.hooks import HANDLERS, run_hook
+    from agflow.hooks import HANDLERS
+    from agflow.hooks import main as hook_main
 
     if event not in HANDLERS:
         fail(f"unknown hook event {event!r}; valid: {', '.join(HANDLERS)}")
-    sys.stdout.write(run_hook(event) + "\n")
+    raise typer.Exit(hook_main(event))  # same process contract as the `python -m agflow hook` fast path
 
 
 @app.command()
@@ -549,11 +562,117 @@ def dashboard(
     port: int = typer.Option(8765, "--port"),
     host: str = typer.Option("127.0.0.1", "--host", help="Keep 127.0.0.1 unless you know why."),
     no_browser: bool = typer.Option(False, "--no-browser"),
+    sidecar: bool = typer.Option(False, "--sidecar",
+                                 help="Run as Antigravity's side-pane panel (Antigravity supplies port and token)."),
 ) -> None:
     """Open the local manager dashboard (token-protected, localhost only)."""
-    from agflow.dashboard.app import serve
+    from agflow.dashboard import app as dashboard_app
 
-    serve(ws_of(workspace), host=host, port=port, open_browser=not no_browser)
+    if sidecar:
+        try:
+            dashboard_app.serve_sidecar(workspace.expanduser().resolve() if workspace else None)
+        except dashboard_app.SidecarError as exc:
+            fail(str(exc))
+        return
+    dashboard_app.serve(ws_of(workspace), host=host, port=port, open_browser=not no_browser)
+
+
+@app.command()
+def workflows(
+    graph: str | None = typer.Argument(None, help="One workflow, for its full detail."),
+    workspace: Path | None = WorkspaceOpt,
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Each workflow with what it needs, whether that is installed, how its runs went and what awaits your decision."""
+    from agflow import workflows as wf
+
+    ws = ws_of(workspace)
+    if graph:
+        data = wf.detail(ws, graph)
+        if data.get("error") and not data.get("nodes"):
+            fail(data["error"])
+        if as_json:
+            print_json(data)
+            return
+        console.print(f"{data['id']} ({data['source']}): {data['title']}", markup=False)
+        for p in data["problems"]:
+            console.print(f"  [{p['level']}] {p['message']}", markup=False, highlight=False)
+        for name, kind in (("agents", "agent"), ("skills", "skill")):
+            for item, info in data["needs"][name].items():
+                state = "ok" if info["found"] and info["enabled"] else ("disabled" if info["found"] else "MISSING")
+                console.print(f"  {kind:<6} {item:<22} {state:<9} used by {', '.join(info['nodes'])}", markup=False)
+        runs = data["runs"]
+        rate = "no finished runs" if runs["success_rate"] is None else f"{runs['success_rate']:.0%} succeeded"
+        console.print(f"  runs   {runs['recorded']} recorded, {rate}", markup=False)
+        for p in data["lessons"][:5]:
+            console.print(f"  lesson {p['runs']}x {p['kind']} at {p['node'] or '(run)'}: {p['detail']}", markup=False,
+                          highlight=False)
+        for p in data["proposals"]:
+            console.print(f"  proposal {p['id']} ({p['status']}): {len(p['changes'])} change(s) - "
+                          f"`agflow improve show {p['id']}`", markup=False)
+        return
+    rows = wf.summary(ws)
+    if as_json:
+        print_json(rows)
+        return
+    tbl = Table(show_header=True, header_style="bold")
+    for col in ("workflow", "source", "steps", "problems", "runs", "pending"):
+        tbl.add_column(col, overflow="fold")
+    for r in rows:
+        p, runs = r["problems"], r["runs"]
+        health = "ok"
+        if r["error"]:
+            health = "ERROR"
+        elif p["error"] or p["warning"]:
+            health = f"{p['error']} err, {p['warning']} warn"
+        finished = runs["succeeded"] + runs["failed"]
+        rate = "-" if runs["success_rate"] is None else f"{runs['success_rate']:.0%} of {finished}"
+        tbl.add_row(r["id"], r["source"], str(r["nodes"]), health, rate, str(r["proposals_pending"] or ""))
+    console.print(tbl)
+
+
+@app.command()
+def maintenance(
+    action: str = typer.Argument("run", help="run: look at compatibility and updates and remember the answer."),
+    as_json: bool = typer.Option(False, "--json"),
+    force: bool = typer.Option(False, "--force", help="Ask GitHub even if the last update check is recent."),
+) -> None:
+    """The daily upkeep the scheduled sidecar runs: read-only, installs nothing, calls no model."""
+    from agflow import maintenance as upkeep
+
+    if action != "run":
+        fail("the only action is `run`")
+    result = upkeep.run(force_update_check=force)
+    if as_json:
+        print_json(result)
+    else:
+        console.print(f"sync: {result['sync']}; update: {result['update']}"
+                      + (f"; {len(result['errors'])} note(s)" if result["errors"] else ""), markup=False)
+
+
+panel_app = typer.Typer(no_args_is_help=True, help="AG-Flow's panel and daily check inside Antigravity.")
+app.add_typer(panel_app, name="panel")
+
+
+@panel_app.command("status")
+def panel_status(as_json: bool = typer.Option(False, "--json")) -> None:
+    """Is the AG-Flow Manager panel installed and switched on? Read-only: it never enables anything for you."""
+    from agflow import sidecars
+
+    items = sidecars.status()
+    if as_json:
+        print_json([i.to_json() for i in items])
+        return
+    for line in sidecars.lines(items):
+        console.print(line, markup=False, highlight=False)
+
+
+@panel_app.command("link")
+def panel_link() -> None:
+    """The chat link that opens the manager in Antigravity's side pane."""
+    from agflow import sidecars
+
+    console.print(sidecars.pill_link(), markup=False, highlight=False)
 
 
 # --- skills / agents / rules -------------------------------------------------------------------------
@@ -667,8 +786,10 @@ def agents_list(workspace: Path | None = WorkspaceOpt, as_json: bool = typer.Opt
 def agents_new(
     name: str,
     description: str = typer.Option(..., "--description", "-d"),
-    model: str = typer.Option("inherit", "--model", help="inherit | flash | pro"),
-    tools: str = typer.Option("view_file,grep_search,list_dir", "--tools", help="Comma-separated tool names."),
+    model: str = typer.Option(platform_vocab.builtin().model_inherit, "--model",
+                              help=" | ".join(platform_vocab.builtin().agent_models)),
+    tools: str = typer.Option(",".join(platform_vocab.builtin().default_agent_tools), "--tools",
+                              help="Comma-separated tool names."),
     main: bool = typer.Option(False, "--main", help="Selectable as the primary agent."),
     scope: str = typer.Option("workspace", "--scope"),
     workspace: Path | None = WorkspaceOpt,
@@ -716,16 +837,15 @@ def rules_list(workspace: Path | None = WorkspaceOpt, as_json: bool = typer.Opti
 @rules_app.command("new")
 def rules_new(
     name: str,
-    trigger: str = typer.Option("model_decision", "--trigger", help="always_on | model_decision | glob | manual"),
+    trigger: str = typer.Option("model_decision", "--trigger", help=" | ".join(platform_vocab.builtin().rule_triggers)),
     description: str = typer.Option("", "--description", "-d"),
     globs: str = typer.Option("", "--globs", help="Comma-separated globs (trigger=glob)."),
     workspace: Path | None = WorkspaceOpt,
 ) -> None:
     """Scaffold a workspace rule with valid trigger frontmatter."""
-    from agflow.validate import RULE_TRIGGERS
-
-    if trigger not in RULE_TRIGGERS:
-        fail(f"trigger must be one of {sorted(RULE_TRIGGERS)}")
+    triggers = platform_vocab.current().rule_triggers
+    if trigger not in triggers:
+        fail(f"trigger must be one of {sorted(triggers)}")
     if trigger == "glob" and not globs:
         fail("--globs is required with --trigger glob")
     meta: dict[str, Any] = {"trigger": trigger}
@@ -906,6 +1026,60 @@ def profile_apply(name: str, workspace: Path | None = WorkspaceOpt) -> None:
 # --- sync -----------------------------------------------------------------------------------------
 
 
+@sync_app.command("check")
+def sync_check(
+    as_json: bool = typer.Option(False, "--json"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Print nothing unless Antigravity drifted or broke "
+                                                            "something AG-Flow depends on."),
+    no_save: bool = typer.Option(False, "--no-save", help="Do not remember the result for doctor and the dashboard."),
+) -> None:
+    """Is AG-Flow still compatible with the installed Antigravity? Exit code 0 ok/unknown, 1 drift, 2 breaking.
+
+    Read-only: looks at the Antigravity version and the vocabulary of its shipped docs; changes nothing."""
+    from agflow import compat
+
+    report = compat.run(save=not no_save)
+    if as_json:
+        print_json(report.to_json())
+    elif not (quiet and report.status in ("ok", "unknown")):
+        for line in report.lines():
+            console.print(line, markup=False, highlight=False)
+    if report.exit_code:
+        raise typer.Exit(report.exit_code)
+
+
+@sync_app.command("apply")
+def sync_apply(
+    workspace: Path | None = WorkspaceOpt,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Verify, but do not record the result."),
+) -> None:
+    """Re-verify AG-Flow against the installed Antigravity and accept it as the new baseline.
+
+    Runs doctor and the live hook probe on AG-Flow's own installation first; refuses if a requirement is gone or the
+    installation has errors. Writes only the accepted baseline (`agflow sync forget` removes it)."""
+    from agflow import compat
+
+    result = compat.apply(ws_of(workspace), dry_run=dry_run)
+    for line in result.report.lines()[1:]:
+        console.print(line, markup=False, highlight=False)
+    for problem in result.problems:
+        console.print(f"  [red]problem:[/] {problem}", highlight=False)
+    for note in result.notes:
+        console.print(note, markup=False, highlight=False)
+    if result.problems or result.report.status == "breaking":
+        raise typer.Exit(1)
+
+
+@sync_app.command("forget")
+def sync_forget() -> None:
+    """Drop the accepted baseline and go back to the one that ships with this AG-Flow."""
+    from agflow import compat
+
+    removed = compat.forget_accepted()
+    console.print("Accepted baseline removed; checks use the shipped baseline again." if removed
+                  else "There was no accepted baseline.")
+
+
 @sync_app.command("gemini-cli")
 def sync_gemini_cli(
     workspace: Path | None = WorkspaceOpt,
@@ -913,13 +1087,410 @@ def sync_gemini_cli(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Copy enabled skills and MCP servers into Gemini CLI's config."""
+    from agflow.sync import SyncError
     from agflow.sync import sync_gemini_cli as do_sync
 
-    report = do_sync(ws_of(workspace), project=project, dry_run=dry_run)
+    try:
+        report = do_sync(ws_of(workspace), project=project, dry_run=dry_run)
+    except SyncError as exc:
+        fail(str(exc))
+    for note in report.notes:
+        console.print(note, style="dim", markup=False, highlight=False)
     for a in report.actions:
         console.print(f"  {a}", markup=False, highlight=False)
     for s in report.skipped:
         console.print(f"[yellow]skipped:[/] {s}")
+
+
+# --- update ---------------------------------------------------------------------------------------
+
+
+def _update_error(exc: Exception) -> None:
+    fail(str(exc))
+
+
+@update_app.command("check")
+def update_check(
+    force: bool = typer.Option(False, "--force", help="Ask GitHub even if the last check is recent."),
+    auto: bool = typer.Option(False, "--auto", help="A background check: honours `config --no-auto-check`."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Print nothing unless an update is available."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Is a newer AG-Flow published? Exit code 0 up to date, 1 update available, 2 could not check.
+
+    Changes nothing. At most one conditional request per interval; a network failure is reported, not raised."""
+    from agflow import update
+
+    result = update.check(force=force, automatic=auto)
+    if as_json:
+        print_json(result.to_json())
+    elif not (quiet and result.status != "available"):
+        for line in result.lines():
+            console.print(line, markup=False, highlight=False)
+    if result.status == "available":
+        raise typer.Exit(1)
+    if result.status == "error":
+        raise typer.Exit(2)
+
+
+def _show_plan(plan: Any, notes_chars: int = 1500) -> None:
+    for line in plan.lines():
+        console.print(line, markup=False, highlight=False)
+    if plan.notes:
+        shown = plan.notes if len(plan.notes) <= notes_chars else plan.notes[:notes_chars].rstrip() + "..."
+        console.print("  release notes:", markup=False)
+        for line in shown.splitlines():
+            console.print(f"    {line}", markup=False, highlight=False)
+
+
+@update_app.command("plan")
+def update_plan(
+    target: str | None = typer.Option(None, "--to", help="A specific release instead of the newest."),
+    allow_breaking: bool = typer.Option(False, "--allow-breaking"),
+    reinstall: bool = typer.Option(False, "--reinstall", help="Plan a repair install of the current version."),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """What updating would do, and anything that blocks it. Changes nothing."""
+    from agflow import update
+    from agflow.release_feed import FeedError
+
+    try:
+        plan = update.plan(target=target, allow_breaking=allow_breaking, reinstall=reinstall)
+    except FeedError as exc:
+        _update_error(exc)
+    if as_json:
+        print_json(plan.to_json())
+    else:
+        _show_plan(plan)
+    if not plan.ok:
+        raise typer.Exit(1)
+
+
+@update_app.command("apply")
+def update_apply_cmd(
+    workspace: Path | None = WorkspaceOpt,
+    target: str | None = typer.Option(None, "--to", help="A specific release instead of the newest."),
+    allow_breaking: bool = typer.Option(False, "--allow-breaking"),
+    reinstall: bool = typer.Option(False, "--reinstall"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+) -> None:
+    """Update AG-Flow now: back up, install, refresh the plugin keeping your edits, verify, undo on any failure.
+
+    Antigravity itself is never updated or modified."""
+    from agflow import update, update_apply  # everything needed after the swap is imported here, before it
+    from agflow.release_feed import FeedError
+
+    try:
+        plan = update.plan(target=target, allow_breaking=allow_breaking, reinstall=reinstall)
+    except FeedError as exc:
+        _update_error(exc)
+    _show_plan(plan)
+    if not plan.ok:
+        raise typer.Exit(1)
+    if not yes and not typer.confirm(f"Update AG-Flow {plan.current} -> {plan.target} now?", default=False):
+        console.print("Nothing changed.")
+        raise typer.Exit(0)
+    try:
+        outcome = update_apply.apply(plan, workspace=_ws_if_any(workspace),
+                                     log=lambda m: console.print(f"  {m}", markup=False, highlight=False))
+    except update_apply.UpdateError as exc:
+        _update_error(exc)
+    for scope, notes in outcome.merge.items():
+        for note in notes:
+            console.print(f"  [{scope}] {note}", markup=False, highlight=False)
+    if outcome.ok:
+        console.print(f"[green]\u2713[/] AG-Flow {outcome.to_version} is installed. Restart Antigravity (or reload the "
+                      "window) to use it; `agflow sync check` re-checks it against your Antigravity.")
+        return
+    if outcome.rolled_back:
+        console.print(f"[yellow]The update failed and was undone:[/] AG-Flow {outcome.from_version} is back.",
+                      highlight=False)
+    for problem in outcome.problems:
+        console.print(f"  problem: {problem}", markup=False, highlight=False)
+    raise typer.Exit(1)
+
+
+@update_app.command("rollback")
+def update_rollback(yes: bool = typer.Option(False, "--yes", "-y")) -> None:
+    """Undo the last update (or finish undoing an interrupted one) from its backup."""
+    from agflow import update, update_apply  # noqa: F401 - imported before the package is swapped back
+
+    if not yes and not typer.confirm("Restore the AG-Flow version and plugin files saved before the last update? "
+                                     "Edits made since then are lost.", default=False):
+        console.print("Nothing changed.")
+        raise typer.Exit(0)
+    try:
+        outcome = update_apply.rollback(log=lambda m: console.print(f"  {m}", markup=False, highlight=False))
+    except update_apply.UpdateError as exc:
+        _update_error(exc)
+    for problem in outcome.problems:
+        console.print(f"  problem: {problem}", markup=False, highlight=False)
+    if not outcome.ok:
+        raise typer.Exit(1)
+    console.print(f"[green]\u2713[/] AG-Flow {outcome.to_version} is restored.")
+
+
+@update_app.command("status")
+def update_status(as_json: bool = typer.Option(False, "--json")) -> None:
+    """Version, how AG-Flow is installed, update settings, and the last check and update. Changes nothing."""
+    from agflow import update
+    from agflow.update_apply import load_journal
+
+    cfg, state, mode = update.load_config(), update.load_state(), update.detect_install_mode()
+    info = update.ReleaseInfo.from_json(state.get("latest"))
+    data = {"version": __version__, "install_mode": mode.kind, "updatable": mode.updatable, "config": cfg.to_json(),
+            "last_check": state.get("checked_at"), "last_error": state.get("error"),
+            "latest": info.to_json() if info else None, "last_apply": state.get("last_apply"),
+            "unfinished": bool(update.unfinished_journal()), "lock": update.lock_held(),
+            "journal_stage": (load_journal() or {}).get("stage")}
+    if as_json:
+        print_json(data)
+        return
+    console.print(f"AG-Flow {__version__} ({mode.kind} install; "
+                  f"{'updatable' if mode.updatable else 'update it with git'})", markup=False)
+    console.print(f"  channel {cfg.channel}, automatic checks {'on' if cfg.auto_check else 'off'}, every "
+                  f"{cfg.interval_hours:g} h, repository {cfg.repo}", markup=False)
+    if info:
+        console.print(f"  latest known release: {info.version}", markup=False)
+    if state.get("error"):
+        console.print(f"  last check failed: {state['error']}", markup=False)
+    applied = state.get("last_apply")
+    if isinstance(applied, dict):
+        verdict = "succeeded" if applied.get("ok") else ("failed and was undone" if applied.get("rolled_back") else
+                                                         "failed")
+        console.print(f"  last update {applied.get('from')} -> {applied.get('to')} {verdict}", markup=False)
+    if data["unfinished"]:
+        console.print("  an update did not finish: run `agflow update rollback`", markup=False)
+
+
+@update_app.command("config")
+def update_config(
+    channel: str | None = typer.Option(None, "--channel",
+                                       help="stable (final releases) or pre (release candidates too)."),
+    auto_check: bool | None = typer.Option(None, "--auto-check/--no-auto-check",
+                                           help="Allow background checks (they never install anything)."),
+    interval_hours: float | None = typer.Option(None, "--interval-hours", help="Minimum hours between checks."),
+) -> None:
+    """Show or change the update settings."""
+    from agflow import update
+
+    cfg = update.load_config()
+    if channel is not None:
+        if channel not in update.CHANNELS:
+            fail(f"--channel must be one of: {', '.join(update.CHANNELS)}")
+        cfg.channel = channel
+    if auto_check is not None:
+        cfg.auto_check = auto_check
+    if interval_hours is not None:
+        if not 1 <= interval_hours <= 24 * 30:
+            fail("--interval-hours must be between 1 and 720")
+        cfg.interval_hours = interval_hours
+    if channel is not None or auto_check is not None or interval_hours is not None:
+        update.save_config(cfg)
+    print_json(cfg.to_json())
+
+
+@update_app.command("verify", hidden=True)
+def update_verify(workspace: Path | None = WorkspaceOpt, as_json: bool = typer.Option(False, "--json")) -> None:
+    """Internal: what an update runs, with the new code, to prove the new version works."""
+    from agflow import compat
+
+    problems = compat.installation_problems(ws_of(workspace))
+    data = {"version": __version__, "problems": problems}
+    if as_json:
+        print_json(data)
+    else:
+        console.print(f"agflow {__version__}: " + ("ok" if not problems else f"{len(problems)} problem(s)"),
+                      markup=False)
+    if problems:
+        raise typer.Exit(1)
+
+
+@update_app.command("refresh", hidden=True)
+def update_refresh(
+    scope: str = typer.Option(..., "--scope"),
+    workspace_root: Path | None = typer.Option(None, "--workspace-root"),
+    profile: str | None = typer.Option(None, "--profile"),
+    no_hooks: bool = typer.Option(False, "--no-hooks"),
+    no_gemini_md: bool = typer.Option(False, "--no-gemini-md"),
+    allow_duplicate: bool = typer.Option(False, "--allow-duplicate"),
+) -> None:
+    """Internal: re-run the installer for one existing install, keeping its settings (used by `update apply`)."""
+    from agflow.install import InstallError
+    from agflow.install import install as do_install
+    from agflow.profiles import ProfileError
+
+    if scope not in ("global", "workspace"):
+        fail("--scope must be global or workspace")
+    ws = workspace_root.expanduser().resolve() if workspace_root and scope == "workspace" else None
+    if scope == "workspace" and ws is None:
+        fail("--scope workspace needs --workspace-root")
+    try:
+        plan = do_install(scope, ws, profile=profile, with_hooks=not no_hooks,  # type: ignore[arg-type]
+                          with_gemini_md=not no_gemini_md, allow_duplicate=allow_duplicate)
+    except (InstallError, ProfileError) as exc:
+        fail(str(exc))
+    print_json({"scope": scope, "target": str(plan.target), "actions": len(plan.actions), "warnings": plan.warnings})
+
+
+# --- improve --------------------------------------------------------------------------------------
+
+
+def _memory_graphs(ws: Path) -> list[str]:
+    base = paths.workflows_state_dir(ws)
+    return sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
+
+
+def _improve_error(exc: Exception) -> None:
+    fail(str(exc))
+
+
+@improve_app.command("lessons")
+def improve_lessons(
+    graph: str | None = typer.Argument(None, help="One workflow (default: every workflow with a memory)."),
+    workspace: Path | None = WorkspaceOpt,
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """What earlier runs taught each workflow: recurring problems per step. Read-only."""
+    from agflow import learn
+
+    ws = ws_of(workspace)
+    out = {}
+    for gid in [graph] if graph else _memory_graphs(ws):
+        runs = learn.load_runs(ws, gid)
+        out[gid] = {"runs": len(runs), "succeeded": sum(1 for r in runs if r.get("status") == "succeeded"),
+                    "patterns": [p.to_json() for p in learn.patterns(learn.load_lessons(ws, gid))]}
+    if as_json:
+        print_json(out)
+        return
+    if not out:
+        console.print("No workflow has a memory yet: lessons are recorded when a run finishes.")
+    for gid, info in out.items():
+        console.print(f"{gid}: {info['runs']} run(s), {info['succeeded']} succeeded", markup=False)
+        for p in info["patterns"]:
+            console.print(f"  {p['runs']}x {p['kind']} at {p['node'] or '(run)'}: {p['detail']}", markup=False,
+                          highlight=False)
+
+
+@improve_app.command("propose")
+def improve_propose(
+    graph: str | None = typer.Argument(None, help="The workflow to look at."),
+    all_: bool = typer.Option(False, "--all", help="Every workflow that has a memory."),
+    workspace: Path | None = WorkspaceOpt,
+) -> None:
+    """Write a proposal for a workflow whose runs show the same problem again. Changes no workflow."""
+    from agflow import improve
+
+    ws = ws_of(workspace)
+    targets = _memory_graphs(ws) if all_ else ([graph] if graph else [])
+    if not targets:
+        fail("name a workflow, or use --all")
+    for gid in targets:
+        try:
+            proposal = improve.propose(ws, gid)
+        except improve.ImproveError as exc:
+            console.print(f"{gid}: {exc}", markup=False)
+            continue
+        if proposal is None:
+            console.print(f"{gid}: nothing recurs often enough to propose a change.", markup=False)
+        else:
+            console.print(f"{gid}: proposal {proposal.id} ({len(proposal.changes)} change(s)): "
+                          f"`agflow improve show {proposal.id}`", markup=False)
+
+
+@improve_app.command("list")
+def improve_list(graph: str | None = typer.Argument(None), workspace: Path | None = WorkspaceOpt) -> None:
+    """Proposals on file, newest first, with their status."""
+    from agflow import improve
+
+    ws = ws_of(workspace)
+    try:
+        found = improve.proposals(ws, graph)
+    except improve.ImproveError as exc:
+        _improve_error(exc)
+    if not found:
+        console.print("No proposals.")
+    for p in found:
+        console.print(f"{p.id}  {p.graph:<20} {improve.current_status(ws, p):<28} {len(p.changes)} change(s)",
+                      markup=False)
+
+
+def _show_proposal(p: Any, ws: Path) -> None:
+    from agflow import improve
+
+    console.print(f"proposal {p.id} for workflow {p.graph} - {improve.current_status(ws, p)}", markup=False)
+    for c in p.changes:
+        console.print(f"  [{c.id}] {c.describe()}", markup=False, highlight=False)
+    if p.source != p.target:
+        console.print(f"  applying writes a workspace copy: {p.target}", markup=False, highlight=False)
+        console.print(f"  (the workflow now comes from {p.source}; later AG-Flow updates to that bundled workflow "
+                      "will not reach this workspace until the copy is removed with `agflow improve undo`)",
+                      markup=False, highlight=False)
+    console.print("")
+    console.print(p.diff, markup=False, highlight=False)
+
+
+@improve_app.command("show")
+def improve_show(proposal: str, workspace: Path | None = WorkspaceOpt) -> None:
+    """A proposal's changes, the evidence for each, and the diff."""
+    from agflow import improve
+
+    ws = ws_of(workspace)
+    try:
+        _show_proposal(improve.get(ws, proposal), ws)
+    except improve.ImproveError as exc:
+        _improve_error(exc)
+
+
+@improve_app.command("apply")
+def improve_apply(
+    proposal: str,
+    only: list[str] = typer.Option([], "--only", help="Apply just this change id (repeatable), e.g. --only c1."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+    workspace: Path | None = WorkspaceOpt,
+) -> None:
+    """Apply a proposal: validated, backed up, reversible with `agflow improve undo` or `agflow fix --undo`."""
+    from agflow import improve
+
+    ws = ws_of(workspace)
+    try:
+        item = improve.get(ws, proposal)
+        _show_proposal(item, ws)
+        if not yes and not typer.confirm("Apply " + ("these changes" if not only else ", ".join(only)) + "?",
+                                         default=False):
+            console.print("Nothing changed.")
+            raise typer.Exit(0)
+        done = improve.apply(ws, proposal, only=only or None)
+    except improve.ImproveError as exc:
+        _improve_error(exc)
+    console.print(f"[green]\u2713[/] applied to {done.target}.", highlight=False)
+    console.print(f"Undo: `agflow improve undo {done.graph}`", markup=False)
+
+
+@improve_app.command("reject")
+def improve_reject(proposal: str, reason: str = typer.Option("", "--reason"),
+                   workspace: Path | None = WorkspaceOpt) -> None:
+    """Decline a proposal; the same changes are not proposed again for 30 days."""
+    from agflow import improve
+
+    try:
+        improve.reject(ws_of(workspace), proposal, reason)
+    except improve.ImproveError as exc:
+        _improve_error(exc)
+    console.print("Rejected. These changes will not be proposed again for 30 days.")
+
+
+@improve_app.command("undo")
+def improve_undo(graph: str, force: bool = typer.Option(False, "--force"),
+                 workspace: Path | None = WorkspaceOpt) -> None:
+    """Revert the last applied proposal of a workflow."""
+    from agflow import improve
+
+    try:
+        done = improve.undo(ws_of(workspace), graph, force=force)
+    except improve.ImproveError as exc:
+        _improve_error(exc)
+    console.print(f"[green]\u2713[/] proposal {done.id} undone; {done.target} is as it was.", highlight=False)
 
 
 # --- graphs ---------------------------------------------------------------------------------------
@@ -1012,7 +1583,7 @@ def _backend(kind: str, ws: Path, script: Path | None, allow_risky: bool, delay:
 
     if kind == "fake":
         data = read_yaml(script, {}) if script else {}
-        return FakeBackend(data or {}, delay=delay)
+        return FakeBackend(data or {}, delay=delay, workspace=ws)
     if kind == "sdk":
         try:
             return SdkBackend(ws, allow_risky=allow_risky)
@@ -1022,6 +1593,8 @@ def _backend(kind: str, ws: Path, script: Path | None, allow_risky: bool, delay:
 
 
 def _drive(ws: Path, run_id: str, backend: Any, approve_human: bool) -> None:
+    import asyncio  # imported here: it is a third of the CLI's start-up cost and only graph runs need it
+
     from agflow.graph.store import RunStore
     from agflow.runner.runner import exit_code, run_graph
 

@@ -1,0 +1,54 @@
+name: Release
+
+# Draft for the maintainer to review and commit. Pushing a tag like v0.4.0 builds the wheel and sdist, writes SHA256SUMS
+# and release.json (what `agflow update` verifies), runs the update smoke test on the built wheels, attests their
+# provenance and creates the GitHub release. Nothing else triggers it.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write       # create the release and upload its files
+  id-token: write       # sign the build provenance
+  attestations: write   # store the attestation
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: The tag matches the version
+        run: |
+          version=$(uv run python -c "import re,sys; print(re.search(r'__version__ = \"([^\"]+)\"', open('src/agflow/__init__.py').read()).group(1))")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+      - name: Install
+        run: uv sync --all-extras --locked
+      - name: Lint
+        run: uv run ruff check src tests scripts
+      - name: Tests
+        run: uv run pytest -q
+      - name: Build and check the release files
+        run: uv run python scripts/make_release.py --out dist/release
+      - name: Smoke test the update path with real wheels
+        run: uv run python scripts/smoke_release.py
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/release/*.whl
+            dist/release/*.tar.gz
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          flags=()
+          if [[ "$version" =~ (a|b|rc|dev|alpha|beta)[0-9]*$ ]]; then flags+=(--prerelease); fi
+          if [ -f "RELEASE-NOTES-$version.md" ]; then flags+=(--notes-file "RELEASE-NOTES-$version.md"); else flags+=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" dist/release/* --title "AG-Flow $version" "${flags[@]}"

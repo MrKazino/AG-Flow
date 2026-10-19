@@ -1,0 +1,15 @@
+{
+  "_provenance": "vendor-doc",
+  "_source": "agy-customizations/docs/hooks.md, 'PreToolUse Contract' input example; command value changed to a dangerous one",
+  "event": "pre-tool-use",
+  "payload": {
+    "toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf /"}},
+    "stepIdx": 19,
+    "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+    "workspacePaths": ["<WS>"],
+    "transcriptPath": "<WS>/.gemini/antigravity/transcript.jsonl",
+    "artifactDirectoryPath": "<WS>/.gemini/antigravity/artifacts",
+    "modelName": "auto"
+  },
+  "expect": {"problems": [], "decision": "deny"}
+}

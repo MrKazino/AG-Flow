@@ -1,0 +1,18 @@
+{
+  "command": "agflow",
+  "args": ["dashboard", "--sidecar"],
+  "description": "AG-Flow Manager: workflows with the skills, agents, MCP servers and files each one needs, runs and lessons, proposed improvements, updates and Antigravity compatibility, in one panel.",
+  "display_name": "AG-Flow Manager",
+  "has_web_ui": true,
+  "restart_policy": "on-failure",
+  "ui_config": {
+    "display_name": "AG-Flow Manager",
+    "views": [
+      {
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "path": "/",
+        "title": "AG-Flow Manager"
+      }
+    ]
+  }
+}

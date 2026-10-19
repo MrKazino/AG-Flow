@@ -25,6 +25,7 @@ nodes:
       Cover components to reuse, states (loading/empty/error), responsive behaviour, accessibility
       requirements and runnable acceptance checks (browser flows).
     outputs: ["docs/specs/{{ run.id }}-ui.md"]
+    evidence: required
 
   - id: build
     title: Build and verify in browser

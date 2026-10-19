@@ -27,8 +27,42 @@ from agflow.graph.schema import Graph
 from agflow.redact import redact_mapping
 
 RUN_INDEX_MAX = 500
-INDEX_FILE = ".index.json"
-INDEX_VERSION = 1
+INDEX_FILE = paths.RUN_INDEX_FILE
+INDEX_VERSION = paths.RUN_INDEX_VERSION
+
+# Every event name written to a run's ledger (``ledger.jsonl``), with what it records. The writers are the engine (state
+# changes), the runner and the MCP server (dispatch and reports), the dashboard and CLI (abort) and the hooks. A new
+# event is registered here first; tests/test_sync_audits.py fails for a name that is used but not listed (and for one
+# that is listed but no longer used), so the ledger's vocabulary cannot drift unnoticed.
+LEDGER_EVENTS: dict[str, str] = {
+    "run_started": "a run was created (graph id and the redacted inputs)",
+    "dispatched": "a node was handed to an agent (node, agent, attempt)",
+    "reported": "an agent's result for a node (status, summary, artifacts)",
+    "succeeded": "a node finished successfully",
+    "failed": "a node failed for good (no retries left, or a `when` that could not be evaluated)",
+    "retry": "a failed node goes back to ready for another attempt",
+    "blocked": "a node cannot run because an upstream node failed",
+    "skipped": "a node's `when` condition was false",
+    "gate_passed": "a gate's dependencies were satisfied",
+    "gate_failed": "a gate failed and cannot rework",
+    "rework": "a failed gate sent its upstream node (and everything after it) back with feedback",
+    "waiting_on_human": "a human node is waiting for a decision (runner)",
+    "human_decision": "a human approved or rejected a node",
+    "resumed": "running nodes were released after a crash or reload",
+    "interrupted": "the headless runner was interrupted and released its running nodes",
+    "report_conflict": "a report for a node was refused because someone else had already settled it",
+    "evidence_rejected": "a `succeeded` report was refused because its evidence check failed (the node is retried "
+                         "with feedback naming what is missing)",
+    "lessons_recorded": "a finished run was added to the workflow's memory (how many lessons it taught)",
+    "evidence_warning": "a report was accepted with notes from the evidence check (stale output, a mentioned file "
+                        "that does not exist)",
+    "runner_stopped": "the headless runner finished (final run status)",
+    "aborted": "the run was aborted",
+    "tool": "an agent tool call, recorded by the PostToolUse hook",
+    "guard_unavailable": "a hook payload the safety guard could not read (once per reason per run)",
+    "run_index_unwritable": "the global run index could not be updated, so another workspace's MCP server may not find "
+                           "this run by its id (the run itself is intact)",
+}
 
 
 def _entry(state: RunState) -> dict[str, Any]:
@@ -66,7 +100,9 @@ class RunStore:
         with self._lock(state.run_id):
             self._write(state)
         self.ledger(state.run_id, {"event": "run_started", "graph": graph.id, "inputs": redact_mapping(inputs)})
-        register_run(state.run_id, self.workspace)
+        problem = register_run(state.run_id, self.workspace)
+        if problem:  # an optimisation, not the truth -- but a missing entry must not be invisible (N1)
+            self.ledger(state.run_id, {"event": "run_index_unwritable", "reason": problem})
         return state
 
     def exists(self, run_id: str) -> bool:
@@ -306,7 +342,10 @@ def _index_file() -> Path:
     return paths.global_state_dir() / "runs-index.json"
 
 
-def register_run(run_id: str, workspace: Path) -> None:
+def register_run(run_id: str, workspace: Path) -> str | None:
+    """Record ``run_id -> workspace`` in the global index. Returns ``None``, or why it could not (the exception type
+    and message): the index is only a shortcut for finding a run from another workspace, so a failure never fails
+    the run -- but the caller records it, so it is not silent."""
     f = _index_file()
     try:
         with FileLock(str(f) + ".lock", timeout=10):
@@ -315,8 +354,20 @@ def register_run(run_id: str, workspace: Path) -> None:
             if len(data) > RUN_INDEX_MAX:
                 data = dict(list(data.items())[-RUN_INDEX_MAX:])
             write_json(f, data)
-    except OSError:
-        pass  # index is an optimisation only
+    except (OSError, ValueError) as exc:  # filelock's Timeout is an OSError; a damaged index is a ValueError
+        return f"{type(exc).__name__}: {exc}"[:200]
+    return None
+
+
+def known_workspaces(limit: int = 20) -> list[Path]:
+    """Workspaces that have had runs, newest first (from the global run index); folders that are gone are left out."""
+    data = read_json(_index_file(), {}) or {}
+    seen: list[Path] = []
+    for ws in reversed(list(data.values())):
+        path = Path(ws)
+        if path not in seen and path.is_dir():
+            seen.append(path)
+    return seen[:limit]
 
 
 def lookup_workspace(run_id: str) -> Path | None:

@@ -8,6 +8,7 @@ description: Apply when running or designing multi-agent workflows — agflow gr
 - The agflow MCP server is the source of truth for run state. Don't track node status in your head — call `graph_status`.
 - Dispatch **all** cards returned by `graph_next` in parallel (one `invoke_subagent` per card). Use `card.agent` as the subagent and pass `card.subagent_prompt` verbatim — it already contains the task, inputs, upstream results, feedback, acceptance criteria and result contract.
 - Report every card exactly once with `graph_report`, copying `status`, `summary` and `artifacts` from the subagent's final JSON block. If the block is missing or malformed, report `failed` with the reason.
+- The engine checks every `succeeded` report against the workspace. An `evidence` block that says the report was rejected means the files or content the card promised are missing: dispatch the node again with the feedback; never re-send the same report.
 - Status semantics: `succeeded` = acceptance criteria met with evidence; `rejected` = negative review/verification verdict (drives the gate's rework loop); `failed` = could not complete (retried automatically).
 - Human cards are approvals: ask the user the question verbatim, wait, then report `succeeded` (approved) or `rejected`.
 - Never edit files a running subagent owns. If two cards would touch the same files, report the conflict and let the graph serialise them.

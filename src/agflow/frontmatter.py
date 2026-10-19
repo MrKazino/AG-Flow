@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import functools
 import re
 from io import StringIO
 from typing import Any
@@ -11,6 +13,13 @@ from ruamel.yaml.error import YAMLError
 from agflow.fsutil import yaml_rt
 
 _FENCE = re.compile(r"^---[ \t]*\r?\n(.*?)(?:\r?\n)?^---[ \t]*(?:\r?\n|$)", re.DOTALL | re.MULTILINE)
+
+
+# Front matter is parsed over and over by a long-lived process (the dashboard, the MCP server) while nothing changed.
+# The cache is keyed on the YAML text itself, never on a file's name or timestamp, so an edited file can not be served
+# stale. Entries are small by construction: longer front matter is parsed every time.
+MAX_CACHED_CHARS = 4000
+CACHE_ENTRIES = 2048
 
 
 class FrontmatterError(ValueError):
@@ -33,15 +42,33 @@ def parse(text: str) -> tuple[dict[str, Any], str]:
     raw, body = split(text)
     if raw is None:
         return {}, body
+    if len(raw) > MAX_CACHED_CHARS:
+        return _load(raw), body
+    data, error = _load_cached(raw)
+    if error is not None:
+        raise FrontmatterError(error)
+    return copy.deepcopy(data), body  # a fresh copy: callers change what they get
+
+
+def _load(raw: str) -> dict[str, Any]:
     try:
         data = yaml_rt().load(raw) if raw.strip() else {}
     except YAMLError as exc:
         raise FrontmatterError(f"invalid YAML frontmatter: {exc}") from exc
     if data is None:
-        return {}, body
+        return {}
     if not isinstance(data, dict):
         raise FrontmatterError("frontmatter must be a YAML mapping")
-    return _plain(data), body
+    return _plain(data)
+
+
+@functools.lru_cache(maxsize=CACHE_ENTRIES)
+def _load_cached(raw: str) -> tuple[dict[str, Any] | None, str | None]:
+    """``(mapping, None)`` or ``(None, message)``: a broken document stays broken without being parsed again."""
+    try:
+        return _load(raw), None
+    except FrontmatterError as exc:
+        return None, str(exc)
 
 
 def has_frontmatter(text: str) -> bool:

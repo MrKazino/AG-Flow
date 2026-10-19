@@ -1,9 +1,11 @@
 {
   "name": "agflow",
-  "version": "0.2.0",
-  "description": "Senior Workflows Manager for Google Antigravity: master operating prompt, 20 engineering skills, 9 specialised subagents, safety hooks and an orchestrator MCP server that runs multi-agent graphs.",
-  "author": "MrKazino",
-  "license": "Apache-2.0",
-  "homepage": "https://github.com/MrKazino/google-antigravity-workflow",
-  "keywords": ["workflows", "orchestration", "subagents", "skills", "tdd", "security", "frontend", "devops"]
+  "displayName": "AG-Flow",
+  "version": "0.4.0",
+  "description": "Senior Workflows Manager for Google Antigravity: master operating prompt, 25 engineering skills, 10 specialised subagents, safety hooks and an orchestrator MCP server that runs multi-agent graphs.",
+  "suggestedPrompts": [
+    "Run the feature-delivery workflow for: <describe the feature>",
+    "Review how my last workflow run went and propose improvements to the workflow",
+    "Is AG-Flow still compatible with my Antigravity? Check for updates"
+  ]
 }

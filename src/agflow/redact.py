@@ -26,7 +26,7 @@ REDACTED = "***REDACTED***"
 SECRET_KEY_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH(?!OR(?!IZ)))", re.IGNORECASE)
 
 _SECRET_VALUE_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),  # OpenAI / Anthropic style API keys
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),  # sk-... style API keys
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),  # Google API keys

@@ -13,17 +13,19 @@ server restarts, IDE reloads and hand-offs between agents.
 from __future__ import annotations
 
 import os
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from agflow import __version__, paths
-from agflow.graph import catalog, engine
+from agflow import __version__, learn, paths
+from agflow.graph import catalog, engine, verify
 from agflow.graph.render import to_mermaid
 from agflow.graph.schema import GraphError, coerce_inputs, parse_graph_text
-from agflow.graph.store import RunNotFound, RunStore, lookup_workspace
+from agflow.graph.store import RUN_INDEX_MAX, RunNotFound, RunStore, lookup_workspace
 
 INSTRUCTIONS = """\
 agflow orchestrates multi-agent work as a graph. Loop: graph_start (once) -> graph_next -> dispatch
@@ -32,7 +34,20 @@ verbatim) -> parse each subagent's final JSON block -> graph_report -> graph_nex
 status is not 'running'. Human cards: ask the user card.task, then graph_report succeeded (approved)
 or rejected. Never mark a node succeeded without evidence. Always pass the absolute workspace path."""
 
-_workspaces: dict[str, Path] = {}
+# run id -> workspace for runs this server started or resumed. The server stays open for as long as Antigravity does,
+# so the cache is bounded (least recently used goes first); an evicted run is still found through the on-disk index
+# that RunStore.create writes (the same RUN_INDEX_MAX cap).
+WORKSPACE_CACHE_MAX = RUN_INDEX_MAX
+_workspaces: OrderedDict[str, Path] = OrderedDict()
+_workspaces_lock = threading.Lock()
+
+
+def _remember(run_id: str, workspace: Path) -> None:
+    with _workspaces_lock:
+        _workspaces[run_id] = workspace
+        _workspaces.move_to_end(run_id)
+        while len(_workspaces) > WORKSPACE_CACHE_MAX:
+            _workspaces.popitem(last=False)
 
 
 def _resolve_workspace(workspace: str | None, run_id: str | None = None) -> Path:
@@ -42,8 +57,10 @@ def _resolve_workspace(workspace: str | None, run_id: str | None = None) -> Path
             raise ValueError("workspace must be an absolute path")
         return ws.resolve()
     if run_id:
-        if run_id in _workspaces:
-            return _workspaces[run_id]
+        with _workspaces_lock:
+            if run_id in _workspaces:
+                _workspaces.move_to_end(run_id)
+                return _workspaces[run_id]
         found = lookup_workspace(run_id)
         if found:
             return found
@@ -102,7 +119,7 @@ def build_server() -> MCPServer:
             state = store.create(g, coerce_inputs(g, inputs), graph_path=str(path))
         except (GraphError, ValueError) as exc:
             return _error(str(exc))
-        _workspaces[state.run_id] = ws
+        _remember(state.run_id, ws)
         return {"ok": True, "run_id": state.run_id, **_brief(state)}
 
     @server.tool()
@@ -116,7 +133,8 @@ def build_server() -> MCPServer:
             with store.transaction(run_id) as state:
                 g = state.graph_model()
                 claimed = engine.claim(g, state, now=time.time(), limit=max_cards)
-                cards = [engine.build_card(g, state, nid) for nid in claimed]
+                taught = learn.lessons_for_card(store.workspace, g.id, claimed)
+                cards = [engine.build_card(g, state, nid, lessons=taught.get(nid)) for nid in claimed]
                 view = engine.status_view(g, state)
         except RunNotFound:
             return _error(f"unknown run '{run_id}' in {store.workspace}")
@@ -139,8 +157,10 @@ def build_server() -> MCPServer:
         try:
             with store.transaction(run_id) as state:
                 g = state.graph_model()
+                ev = verify.check(g, state, node_id, status=status, summary=summary, artifacts=artifacts)
                 events = engine.report(g, state, node_id, status, now=time.time(), summary=summary,  # type: ignore[arg-type]
-                                       artifacts=artifacts, followups=followups)
+                                       artifacts=artifacts, followups=followups, evidence_problems=ev.problems,
+                                       evidence_notes=ev.warnings)
                 view = engine.status_view(g, state)
                 finished = state.status != "running"
                 if finished:
@@ -153,9 +173,15 @@ def build_server() -> MCPServer:
                               "summary": summary[:500], "artifacts": artifacts or []})
         for e in events:
             store.ledger(run_id, e)
-        return {"ok": True, "run_id": run_id, "events": events, "status": view["status"],
-                "ready": view["ready"], "running": view["running"],
-                "waiting_on_human": view["waiting_on_human"], "next_action": view["next_action"]}
+        answer = {"ok": True, "run_id": run_id, "events": events, "status": view["status"],
+                  "ready": view["ready"], "running": view["running"],
+                  "waiting_on_human": view["waiting_on_human"], "next_action": view["next_action"]}
+        if ev.problems or ev.warnings:
+            answer["evidence"] = ev.to_json()
+        if finished:  # the workflow remembers what this run taught (never raises)
+            taught = learn.record_run(store.workspace, state, store.read_ledger(run_id, limit=2000))
+            store.ledger(run_id, {"event": "lessons_recorded", "count": taught})
+        return answer
 
     @server.tool()
     def graph_status(run_id: str | None = None, workspace: str | None = None,
@@ -196,8 +222,49 @@ def build_server() -> MCPServer:
         except RunNotFound:
             return _error(f"unknown run '{run_id}'")
         store.ledger(run_id, {"event": "resumed", "released": released})
-        _workspaces[run_id] = store.workspace
+        _remember(run_id, store.workspace)
         return {"ok": True, "released": released, **_brief_view(view)}
+
+    @server.tool()
+    def graph_overview(workspace: str | None = None) -> dict[str, Any]:
+        """Every workflow in the workspace at a glance: steps, problems that stop it running (missing or disabled
+        agents and skills, no agflow MCP server), remembered runs and how many succeeded, improvement proposals waiting
+        for approval; plus what the daily check last found and whether the AG-Flow Manager panel is switched on.
+        Read-only and cheap; `graph_lessons` and `agflow workflows <graph>` go deeper."""
+        # only this tool needs these; importing them here keeps the server's start-up light
+        from agflow import maintenance, sidecars, workflows
+
+        try:
+            ws = _resolve_workspace(workspace)
+        except ValueError as exc:
+            return _error(str(exc))
+        panel = next((s for s in sidecars.status() if s.id == sidecars.MANAGER), None)
+        return {"ok": True, "workspace": str(ws), "workflows": [
+            {"id": r["id"], "source": r["source"], "steps": r["nodes"], "problems": r["problems"],
+             "runs": {k: r["runs"][k] for k in ("recorded", "succeeded", "failed", "success_rate")},
+             "active": r["active"], "proposals_pending": r["proposals_pending"],
+             **({"error": r["error"]} if r["error"] else {})} for r in workflows.summary(ws)],
+                "notes": maintenance.health()["notes"],
+                "panel": {"ready": bool(panel and panel.ready),
+                          "link": sidecars.pill_link() if panel and panel.ready else None}}
+
+    @server.tool()
+    def graph_lessons(graph: str, workspace: str | None = None, node: str | None = None) -> dict[str, Any]:
+        """What earlier runs of workflow `graph` taught: recurring problems per step, each with the number of runs that
+        showed it, plus how many runs succeeded. Read-only. Changes to the workflow itself are only ever proposed
+        (`agflow improve propose`) and need the user's approval."""
+        try:
+            ws = _resolve_workspace(workspace)
+        except ValueError as exc:
+            return _error(str(exc))
+        if learn.workflow_dir(ws, graph) is None:
+            return _error(f"'{graph}' is not a graph id")
+        runs = learn.load_runs(ws, graph)
+        found = learn.patterns(learn.load_lessons(ws, graph), node=node)
+        return {"ok": True, "graph": graph, "workspace": str(ws),
+                "runs": {"recorded": len(runs), "succeeded": sum(1 for r in runs if r.get("status") == "succeeded"),
+                         "failed": sum(1 for r in runs if r.get("status") == "failed")},
+                "patterns": [p.to_json() for p in found[:15]]}
 
     @server.tool()
     def graph_abort(run_id: str, reason: str = "aborted by user", workspace: str | None = None) -> dict[str, Any]:

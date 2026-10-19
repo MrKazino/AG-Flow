@@ -1,0 +1,7 @@
+{
+  "_provenance": "synthetic",
+  "_source": "deliberate drift: every key renamed, as if Antigravity changed the whole payload layout",
+  "event": "pre-tool-use",
+  "payload": {"invocation": {"fn": "run_command", "params": {"CommandLine": "rm -rf /"}}, "ws": "<WS>"},
+  "expect": {"problems": ["unknown_shape"], "decision": null}
+}

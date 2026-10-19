@@ -78,7 +78,13 @@ UV=$(find_uv || true)
 #        (scripts/install-uv.sh reads scripts/uv-pin.env; nothing is piped into a shell)
 if [ -z "$UV" ]; then
   echo "uv (the Python package manager from Astral) is required and was not found."
-  if [ -z "$YES" ] && [ -t 0 ]; then
+  if [ -z "$YES" ]; then
+    if [ ! -t 0 ]; then
+      echo "error: uv is required and installing it needs your approval, but this session is not interactive." >&2
+      echo "Re-run with --yes to install the pinned, checksum-verified uv, or install uv yourself:" >&2
+      echo "https://docs.astral.sh/uv/getting-started/installation/" >&2
+      exit 1
+    fi
     printf "Install uv now from https://astral.sh/uv ? [Y/n] "
     read -r answer || answer=""
     case "$answer" in

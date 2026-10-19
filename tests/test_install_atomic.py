@@ -110,7 +110,7 @@ def test_a_crash_at_any_step_is_recoverable_and_uninstall_restores_the_original_
 
     # a complete plugin still exists somewhere recoverable, and the manifest already records the backup
     assert (target / "plugin.json").exists() or any((p / "plugin.json").exists() for p in tmp_dir().glob("*-old"))
-    manifest = json.loads(inst._manifest_path("global", None).read_text(encoding="utf-8"))
+    manifest = json.loads(inst.manifest_path("global", None).read_text(encoding="utf-8"))
     assert str(target) in manifest["modified"], "the backup of the replaced plugin must be journalled first"
     assert Path(manifest["modified"][str(target)]).exists()
 
@@ -138,7 +138,7 @@ def test_the_manifest_is_on_disk_before_the_old_plugin_is_touched(lived_in, monk
     seen: dict[str, object] = {}
 
     def look_then_crash(src: Path, dest: Path, *a: object, **k: object) -> None:
-        manifest_file = inst._manifest_path("global", None)
+        manifest_file = inst.manifest_path("global", None)
         seen["manifest_exists"] = manifest_file.is_file()
         seen["old_plugin_untouched"] = (paths.global_layout().plugins_dir / "agflow" / "old.txt").is_file()
         raise Crash
@@ -263,8 +263,8 @@ def test_a_manifest_written_by_an_older_agflow_still_uninstalls(lived_in):
     write(target / "plugin.json", json.dumps({"name": "agflow", "version": "9", "description": "installed by 0.2.0"}))
     manifest = {"scope": "global", "created": [], "modified": {str(target): str(saved)}, "managed_blocks": [],
                 "source": "x", "profile": None, "command": ["agflow"]}
-    inst._manifest_path("global", None).parent.mkdir(parents=True, exist_ok=True)
-    inst._manifest_path("global", None).write_text(json.dumps(manifest), encoding="utf-8")
+    inst.manifest_path("global", None).parent.mkdir(parents=True, exist_ok=True)
+    inst.manifest_path("global", None).write_text(json.dumps(manifest), encoding="utf-8")
     uninstall("global")
     assert (target / "old.txt").read_text() == "old"
     assert json.loads((target / "plugin.json").read_text())["version"] == "0.0.1"

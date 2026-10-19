@@ -1,0 +1,15 @@
+id: sdk-smoke
+version: 1
+title: SDK smoke test
+description: One read-only node. The nightly SDK job runs it with the real Antigravity SDK and compares the shape of the run report.
+defaults:
+  retries: 0
+  timeout_min: 10
+  max_parallel: 1
+nodes:
+  - id: check
+    title: Answer immediately
+    agent: researcher
+    prompt: |
+      This is an automated smoke test of the agflow integration. Do not read, search or change any file and do not
+      run any command. Finish at once and report status "succeeded" with the summary "smoke ok".

@@ -1,0 +1,7 @@
+{
+  "builtin": "schedule",
+  "args": ["CRON_TZ=UTC 17 9 * * *", "agflow", "maintenance", "run"],
+  "description": "Once a day: checks that AG-Flow still matches the installed Antigravity and whether a newer AG-Flow is published. Reads and records only; it installs nothing and starts no conversation.",
+  "display_name": "AG-Flow daily check",
+  "restart_policy": "always"
+}

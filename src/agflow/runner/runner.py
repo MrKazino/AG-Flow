@@ -7,7 +7,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from agflow.graph import engine
+from agflow import learn
+from agflow.graph import engine, verify
 from agflow.graph.engine import RunState
 from agflow.graph.store import RunStore
 from agflow.runner.backends import AgentBackend, NodeResult
@@ -34,7 +35,8 @@ async def run_graph(store: RunStore, run_id: str, backend: AgentBackend, *, appr
                 if state.status != "running":
                     break
                 claimed = engine.claim(g, state, now=time.time())
-                cards = [engine.build_card(g, state, nid) for nid in claimed]
+                taught = learn.lessons_for_card(store.workspace, g.id, claimed)
+                cards = [engine.build_card(g, state, nid, lessons=taught.get(nid)) for nid in claimed]
             for card in cards:
                 log({"event": "dispatched", "node": card["node_id"], "agent": card["agent"],
                      "attempt": card["attempt"], "backend": backend.name})
@@ -52,12 +54,13 @@ async def run_graph(store: RunStore, run_id: str, backend: AgentBackend, *, appr
                 break
             done, _ = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
-                nid = tasks.pop(task)
+                nid = tasks[task]  # in flight until its result is recorded: if that fails, `finally` gives it back
                 try:
                     result = task.result()
                 except Exception as exc:  # backend crash counts as a failed attempt
                     result = NodeResult(status="failed", summary=f"backend error: {type(exc).__name__}: {exc}")
                 _report(store, run_id, nid, result, log)
+                del tasks[task]
     finally:
         if tasks:  # interrupted: cancel in-flight work and give the nodes back without burning attempts
             for task in tasks:
@@ -68,6 +71,9 @@ async def run_graph(store: RunStore, run_id: str, backend: AgentBackend, *, appr
             log({"event": "interrupted", "released": list(tasks.values())})
     final = store.load(run_id)
     store.write_report(final)
+    if final.status != "running":  # the workflow remembers what this run taught (never raises)
+        log({"event": "lessons_recorded",
+             "count": learn.record_run(store.workspace, final, store.read_ledger(run_id, limit=2000))})
     log({"event": "runner_stopped", "status": final.status})
     return final
 
@@ -83,8 +89,11 @@ def _report(store: RunStore, run_id: str, node_id: str, result: NodeResult, log:
     try:
         with store.transaction(run_id) as state:
             g = state.graph_model()
+            ev = verify.check(g, state, node_id, status=result.status, summary=result.summary,
+                              artifacts=result.artifacts)
             events = engine.report(g, state, node_id, result.status, now=time.time(), summary=result.summary,
-                                   artifacts=result.artifacts, followups=result.followups)
+                                   artifacts=result.artifacts, followups=result.followups,
+                                   evidence_problems=ev.problems, evidence_notes=ev.warnings)
     except engine.EngineError as exc:
         log({"event": "report_conflict", "node": node_id, "status": result.status, "reason": str(exc)})
         return

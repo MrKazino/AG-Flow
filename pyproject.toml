@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agflow"
-version = "0.2.0"
+version = "0.4.0"
 description = "Senior Workflows Manager for Google Antigravity: master prompt, skills, subagents, hooks, graph orchestration (MCP + SDK) and a manager app."
 readme = "README.md"
 license = "Apache-2.0"
@@ -36,10 +36,16 @@ sdk = ["google-antigravity>=0.1.20"]
 agflow = "agflow.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/MrKazino/google-antigravity-workflow"
+Homepage = "https://github.com/MrKazino/AG-Flow"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27", "ruff>=0.5"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "ruff>=0.5",
+    "pytest-cov>=7.1.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agflow"]
@@ -51,6 +57,17 @@ packages = ["src/agflow"]
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+markers = [
+    "sync_audit: repository-wide consistency audits (S1-S10); run them alone with `pytest -m sync_audit`",
+]
+
+[tool.coverage.run]
+source = ["agflow"]
+
+[tool.coverage.report]
+# the floor itself lives in CI (`--cov-fail-under`), not here: a developer running one test file must not fail on it
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 line-length = 120

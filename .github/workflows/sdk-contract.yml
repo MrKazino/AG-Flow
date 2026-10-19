@@ -1,0 +1,57 @@
+name: SDK contract
+
+# Does the newest published Antigravity SDK still fit what agflow relies on?
+# The ordinary CI job tests against the SDK version in uv.lock. This one runs every night against the latest release,
+# and on demand. Part 1 needs nothing but the package. Part 2 runs one real agent and needs a repository secret.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      AGFLOW_REQUIRE_SDK: "1"  # a missing SDK is a failure here, not a skipped test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install (locked)
+        run: uv sync --all-extras --locked
+      - name: Use the newest published SDK
+        # uv.lock pins the release agflow was last tested with; this asks whether the next one still fits.
+        run: |
+          uv pip install --upgrade google-antigravity
+          uv pip list | grep -i antigravity | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Contract tests (the SDK's surface, and SdkBackend against it)
+        run: >
+          uv run --no-sync pytest -q
+          tests/test_sdk_contract.py tests/test_sdk_backend.py tests/test_sdk_run.py tests/test_report_schema.py
+      - name: Live run with the real SDK (needs the GOOGLE_API_KEY secret)
+        env:
+          # the secret keeps the name GOOGLE_API_KEY; the SDK reads GEMINI_API_KEY
+          GEMINI_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          HAVE_KEY: ${{ secrets.GOOGLE_API_KEY != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAVE_KEY" != "true" ]; then
+            echo "::warning title=Live SDK run skipped::The GOOGLE_API_KEY repository secret is not set, so no real agent was run."
+            echo "**The live SDK run was skipped: no GOOGLE_API_KEY secret.**" >> "$GITHUB_STEP_SUMMARY"
+            # a manual run exists to do the live check: say plainly that it did not happen
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then exit 1; fi
+            exit 0
+          fi
+          ws="$(mktemp -d)"
+          git -C "$ws" init -q
+          uv run --no-sync agflow init -w "$ws" --profile core
+          uv run --no-sync agflow graph run tests/fixtures/sdk_smoke_graph.yaml --backend sdk -w "$ws"
+          report="$(ls "$ws"/.agents/agflow/runs/*/report.json | head -1)"
+          python3 scripts/report_schema.py "$report" --snapshot tests/snapshots/run_report_keys.json

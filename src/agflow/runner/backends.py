@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import math
 import os
 import re
 from collections.abc import Callable
@@ -17,10 +19,14 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
-from agflow import frontmatter
+from agflow import frontmatter, platform_vocab
+from agflow.graph.schema import DEFAULT_TIMEOUT_MIN, TIMEOUT_MIN_RANGE
+from agflow.graph.verify import within
 from agflow.hooks import check_command
 from agflow.inventory import Inventory
 from agflow.models import Kind
+
+log = logging.getLogger("agflow.runner")
 
 
 class RunnerError(RuntimeError):
@@ -42,16 +48,39 @@ class AgentBackend(Protocol):
     async def run(self, card: dict[str, Any]) -> NodeResult: ...
 
 
-_JSON_BLOCK = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_FENCE_OPEN = re.compile(r"```(?:json)?\s*(?=[\[{])")
+_FENCE_CLOSE = re.compile(r"\s*```")
+_DECODER = json.JSONDecoder()
+
+
+def _fenced_json_blocks(text: str) -> list[Any]:
+    """Every JSON value that sits alone inside a fence, in reading order.
+
+    The value is read with a real JSON parser rather than a pattern, so a ``}`` or a fence inside a string value cannot
+    end it early; the scan resumes after the value, so a fence quoted inside a string is never mistaken for an opener.
+    """
+    found: list[Any] = []
+    pos = 0
+    while (opener := _FENCE_OPEN.search(text, pos)) is not None:
+        try:
+            value, end = _DECODER.raw_decode(text, opener.end())
+        except (ValueError, RecursionError):
+            pos = opener.end()
+            continue
+        pos = end
+        if _FENCE_CLOSE.match(text, end):
+            found.append(value)
+    return found
 
 
 def parse_result_text(text: str) -> NodeResult:
-    """Extract the final fenced JSON block from an agent reply."""
-    for raw in reversed(_JSON_BLOCK.findall(text or "")):
-        try:
-            return NodeResult.model_validate(json.loads(raw))
-        except (json.JSONDecodeError, ValidationError):
-            continue
+    """Extract the final fenced JSON result from an agent reply (an object, or the last valid object of an array)."""
+    for value in reversed(_fenced_json_blocks(text or "")):
+        for candidate in reversed(value) if isinstance(value, list) else [value]:
+            try:
+                return NodeResult.model_validate(candidate)
+            except ValidationError:
+                continue
     tail = (text or "").strip()[-600:]
     return NodeResult(status="failed", summary=f"agent reply had no valid result JSON block. Tail: {tail}")
 
@@ -60,16 +89,45 @@ def parse_result_text(text: str) -> NodeResult:
 
 
 class FakeBackend:
-    """Returns scripted results: ``{node_id: [result_for_attempt_1, result_for_attempt_2, ...]}``."""
+    """Returns scripted results: ``{node_id: [result_for_attempt_1, result_for_attempt_2, ...]}``.
+
+    With a ``workspace`` the default (unscripted) result also writes a clearly marked placeholder for each declared
+    output, so a dry run passes the same evidence checks a real run must pass."""
 
     name = "fake"
 
     def __init__(self, script: dict[str, list[dict[str, Any]]] | None = None, delay: float = 0.0,
-                 on_run: Callable[[dict[str, Any]], None] | None = None):
+                 on_run: Callable[[dict[str, Any]], None] | None = None, workspace: Path | None = None):
         self.script = {k: list(v) for k, v in (script or {}).items()}
         self.delay = delay
         self.on_run = on_run
+        self.workspace = workspace
         self.calls: list[dict[str, Any]] = []
+
+    def _write_placeholders(self, card: dict[str, Any]) -> None:
+        if self.workspace is None:
+            return
+        note = (f"[fake] {card['title']}: a placeholder written by the fake backend for a dry run. "
+                "No model was called.\n")
+        for out in card.get("expected_outputs", []):
+            target = within(self.workspace, out)
+            if target is None or any(c in out for c in "*?["):
+                continue
+            if out.endswith(("/", "\\")):
+                target.mkdir(parents=True, exist_ok=True)
+                (target / "fake-evidence.txt").write_text(note, encoding="utf-8")
+            elif not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(note, encoding="utf-8")
+        for chk in (card.get("evidence") or {}).get("checks", []):  # satisfy the node's own declared checks
+            target = within(self.workspace, chk["file"])
+            if target is None:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            body = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else note
+            body += "".join(f"{s}\n" for s in chk.get("contains", []) if s not in body)
+            body += "." * max(0, int(chk.get("min_bytes") or 0) - len(body.encode("utf-8")))
+            target.write_text(body, encoding="utf-8")
 
     async def run(self, card: dict[str, Any]) -> NodeResult:
         self.calls.append(card)
@@ -80,27 +138,21 @@ class FakeBackend:
         queue = self.script.get(card["node_id"])
         if queue:
             return NodeResult.model_validate(queue.pop(0))
-        return NodeResult(status="succeeded", summary=f"[fake] {card['title']} completed",
+        self._write_placeholders(card)
+        return NodeResult(status="succeeded", summary=f"[fake] {card['title']} completed (dry run, no model called)",
                           artifacts=list(card.get("expected_outputs", [])))
 
 
 # --- Antigravity SDK ------------------------------------------------------------------------------
 
-# Antigravity agent-file tool names -> SDK BuiltinTools values.
-TOOL_MAP = {
-    "view_file": "view_file", "view_file_outline": "view_file", "view_code_item": "view_file",
-    "list_dir": "list_directory", "grep_search": "search_directory", "codebase_search": "search_directory",
-    "find_by_name": "find_file", "write_to_file": "create_file", "replace_file_content": "edit_file",
-    "multi_replace_file_content": "edit_file", "run_command": "run_command", "command_status": "run_command",
-    "send_command_input": "run_command", "read_terminal": "run_command", "search_web": "search_web",
-    "read_url_content": "read_url_content", "invoke_subagent": "start_subagent",
-    "define_subagent": "start_subagent", "generate_image": "generate_image",
-}
-_CMD_KEYS = ("CommandLine", "command_line", "commandLine", "command", "cmd")
+# Antigravity agent-file tool names -> SDK BuiltinTools values. The mapping lives in platform_vocab (versioned, and
+# overridable without a release); this alias is the built-in table, kept for compatibility. build_config uses the
+# effective table, overrides included.
+TOOL_MAP = dict(platform_vocab.builtin().sdk_tool_map)
 
 
 def _command_of(args: dict[str, Any]) -> str:
-    for k in _CMD_KEYS:
+    for k in platform_vocab.current().keys("command"):
         if isinstance(args.get(k), str):
             return args[k]
     return ""
@@ -145,21 +197,33 @@ class SdkBackend:
         from google.antigravity import BuiltinTools, CapabilitiesConfig, LocalAgentConfig
         from google.antigravity.hooks import policy
 
+        vocab = platform_vocab.current(self.workspace)
         meta, body = self._agent_definition(card["agent"])
         tools = meta.get("tools")
-        caps: dict[str, Any] = {"enable_subagents": bool(tools and "invoke_subagent" in tools)}
+        caps: dict[str, Any] = {"enable_subagents": bool(tools and vocab.subagent_tool in tools)}
         if tools:
-            enabled = {BuiltinTools(TOOL_MAP[t]) for t in tools if t in TOOL_MAP}
+            # Tools Antigravity knows but the SDK has no equivalent for (UI-only ones) are normal. A name the
+            # vocabulary has never heard of may be a rename: say so instead of silently dropping the capability.
+            unknown = sorted(t for t in tools if t not in vocab.agent_tools and not t.startswith("mcp"))
+            if unknown:
+                log.warning("agent '%s': tool(s) %s are unknown to this agflow version (%s) and are not given to the "
+                            "headless agent; if Antigravity renamed them, extend the table in vocab.json",
+                            card["agent"], ", ".join(unknown), vocab.describe())
+            enabled = {BuiltinTools(vocab.sdk_tool_map[t]) for t in tools if t in vocab.sdk_tool_map}
             enabled.add(BuiltinTools.FINISH)  # needed for structured output
             caps["enabled_tools"] = sorted(enabled, key=lambda t: t.value)
         exec_policy = meta.get("commandExecutionPolicy", "auto")
         policies = [*policy.workspace_only([str(self.workspace)])]
         if exec_policy == "off":
-            policies.append(policy.deny("run_command", name="agflow-exec-off",
+            policies.append(policy.deny(vocab.command_tool, name="agflow-exec-off",
                                         reason="this agent's commandExecutionPolicy is off"))
         else:
-            policies.append(policy.deny("run_command", when=guard_predicate(self.allow_risky), name="agflow-guard",
+            policies.append(policy.deny(vocab.command_tool, when=guard_predicate(self.allow_risky), name="agflow-guard",
                                         reason="blocked by the agflow guard (destructive or needs human approval)"))
+        # The list order is irrelevant: the SDK ranks "Specific Deny > Specific Ask > Specific Allow > Wildcard Deny >
+        # Wildcard Ask > Wildcard Allow" (google/antigravity/hooks/policy.py, module docstring). allow_all() is a
+        # wildcard allow, so it can never outrank the specific run_command deny above, wherever it is placed.
+        # tests/test_sdk_contract.py runs both orders against the installed SDK and watches that docstring.
         policies.append(policy.allow_all())
         kwargs: dict[str, Any] = {
             "system_instructions": body.strip(),
@@ -194,15 +258,27 @@ class SdkBackend:
                 return parse_result_text(await response.text())
 
         try:
-            return await asyncio.wait_for(_go(), timeout=card.get("timeout_min", 30) * 60)
+            return await asyncio.wait_for(_go(), timeout=timeout_seconds(card))
         except asyncio.TimeoutError:
-            return NodeResult(status="failed", summary=f"timed out after {card.get('timeout_min')} min")
+            return NodeResult(status="failed", summary=f"node '{card.get('node_id', '?')}' timed out after "
+                                                       f"{timeout_seconds(card) / 60:g} min")
+
+
+def timeout_seconds(card: dict[str, Any]) -> float:
+    """How long a node may run: the card's ``timeout_min`` within the graph schema's bounds, else the default.
+
+    A hand-built card may omit it, set it to ``None`` or to something that is not a number; none of those may stop the
+    node from running, and a bool is not a number of minutes.
+    """
+    minutes = card.get("timeout_min")
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not math.isfinite(minutes):
+        minutes = DEFAULT_TIMEOUT_MIN
+    low, high = TIMEOUT_MIN_RANGE
+    return float(min(max(minutes, low), high) * 60)
 
 
 def model_for_tier(tier: str | None) -> str | None:
     """Map an agent's model tier to a concrete model id via env vars (SDK default when unset)."""
-    if tier == "pro":
-        return os.environ.get("AGFLOW_MODEL_PRO") or os.environ.get("AGFLOW_MODEL")
-    if tier == "flash":
-        return os.environ.get("AGFLOW_MODEL_FLASH") or os.environ.get("AGFLOW_MODEL")
+    if tier in platform_vocab.current().model_tiers():  # every tier in the vocabulary has its own AGFLOW_MODEL_<TIER>
+        return os.environ.get(f"AGFLOW_MODEL_{tier.upper()}") or os.environ.get("AGFLOW_MODEL")
     return os.environ.get("AGFLOW_MODEL")

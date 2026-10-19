@@ -30,6 +30,7 @@ nodes:
       {% if inputs.constraints %}Constraints: {{ inputs.constraints }}{% endif %}
       Save it to the expected output path. Acceptance criteria must be runnable checks.
     outputs: ["docs/specs/{{ run.id }}.md"]
+    evidence: required
     acceptance:
       - Spec covers design, files to change, test plan and runnable acceptance criteria
       - Open questions are listed explicitly
@@ -67,6 +68,22 @@ nodes:
       Run the full test suite including the new acceptance tests. Approve only if every acceptance
       criterion is met and there are no blocker/major findings; otherwise report `rejected`.
 
+  - id: verify-claims
+    title: Independently verify the claims
+    agent: verifier
+    skill: verify-claims
+    depends_on: [implement, acceptance-tests]
+    prompt: |
+      Verify the claims made by the implement and acceptance-tests steps for: {{ inputs.feature }}.
+      Re-run the project's tests and checks yourself, confirm every file and behaviour the upstream summaries state,
+      and write the claims ledger to the expected output path. Do not change any code or test.
+    outputs: ["docs/verification/{{ run.id }}.md"]
+    evidence: required
+    checks:
+      - {file: "docs/verification/{{ run.id }}.md", contains: ["| Claim |", "Verdict:"], min_bytes: 120}
+    acceptance:
+      - Every load-bearing claim is verified, or listed as unverifiable with what would settle it
+
   - id: security
     title: Security review of the change
     agent: security-auditor
@@ -78,7 +95,7 @@ nodes:
 
   - id: quality-gate
     type: gate
-    depends_on: [review, security]
+    depends_on: [review, security, verify-claims]
     on_fail: {goto: implement, max_loops: 2}
 
   - id: ui-verify
@@ -90,7 +107,9 @@ nodes:
     prompt: |
       Verify the UI of this feature in the browser: {{ inputs.feature }}.
       Check every flow and state from the spec, the console, 375/768/1280px layouts and keyboard access.
+      Save screenshots and a short notes file in the expected output folder: that folder is the evidence.
     outputs: [".agents/agflow/evidence/{{ run.id }}/"]
+    evidence: required
 
   - id: approve
     type: human

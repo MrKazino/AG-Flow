@@ -1,0 +1,7 @@
+{
+  "_provenance": "synthetic",
+  "_source": "deliberate drift: a file tool whose path argument was renamed (AbsolutePath -> Location)",
+  "event": "pre-tool-use",
+  "payload": {"toolCall": {"name": "view_file", "args": {"Location": "<WS>/.env"}}, "workspacePaths": ["<WS>"]},
+  "expect": {"problems": ["guard_blind:path"], "decision": null}
+}

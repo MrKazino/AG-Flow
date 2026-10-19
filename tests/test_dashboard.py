@@ -6,6 +6,7 @@ from agflow.graph.catalog import resolve
 from agflow.graph.schema import coerce_inputs
 from agflow.graph.store import RunStore
 from agflow.install import install
+from tests.conftest import BUNDLED_SKILLS
 
 TOKEN = "t0ken"
 
@@ -31,7 +32,7 @@ def test_auth_and_host_checks(workspace):
 
 def test_overview_and_doctor(client):
     o = client.get("/api/overview").json()
-    assert o["counts"]["skill"]["enabled"] == 20 and o["install"]["global"]["installed"]
+    assert o["counts"]["skill"]["enabled"] == BUNDLED_SKILLS and o["install"]["global"]["installed"]
     assert client.get("/api/doctor").json()["counts"]["error"] == 0
 
 
@@ -94,7 +95,7 @@ def test_run_endpoints(client, workspace):
 
 def test_profiles_and_install(client, workspace):
     profiles = client.get("/api/profiles").json()
-    assert len(profiles["full"]["skills"]) == 20
+    assert len(profiles["full"]["skills"]) == BUNDLED_SKILLS
     refused = client.post("/api/install", json={"scope": "workspace", "profile": "core", "dry_run": True})
     assert refused.status_code == 400 and "already installed globally" in refused.json()["detail"]
     r = client.post("/api/install", json={"scope": "workspace", "profile": "core", "dry_run": True,
@@ -250,3 +251,61 @@ def test_the_dashboard_script_never_puts_a_token_in_a_url():
         encoding="utf-8")
     assert "?token=" not in js and "&token=" not in js
     assert "stream-ticket" in js and "ticket=" in js
+
+
+# --- F29: one palette, one table builder, one undo ----------------------------------------------------------------
+
+
+def _static(name: str) -> str:
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parents[1] / "src" / "agflow" / "dashboard" / "static" / name).read_text(
+        encoding="utf-8")
+
+
+def test_no_duplicate_dark_palette():
+    """The dark colours used to be written twice (system preference and the manual switch) and had to be edited in
+    both places; every theme colour is now one ``light-dark()`` token, written once."""
+    import re
+
+    css = _static("app.css")
+    for dark_hex in ("#0f1017", "#171824", "#e8e9f3", "#8b85ff", "#5ccf85", "#ff7b72"):
+        assert css.count(dark_hex) == 1, f"{dark_hex} appears {css.count(dark_hex)} times in app.css"
+    assert "prefers-color-scheme" not in css, "the theme follows color-scheme; no media-query copy of the palette"
+    assert len(re.findall(r"--[\w-]+:\s*light-dark\(", css)) >= 18
+    # the switch forces a scheme and nothing else
+    for theme in ("light", "dark"):
+        block = re.search(rf':root\[data-theme="{theme}"\]\s*\{{([^}}]*)\}}', css)
+        assert block and block.group(1).strip() == f"color-scheme: {theme};"
+    assert "color-scheme: light dark;" in css
+
+
+def test_the_rules_page_is_built_from_the_shared_component_table():
+    js = _static("app.js")
+    rules = js[js.index("pages.rules"):js.index("pages.mcp")]
+    assert 'componentTable("rule"' in rules
+    assert "toggleSwitch(" not in rules, "the rules page must not carry its own copy of the enable switch"
+    assert js.count("/toggle`, { method: \"POST\"") >= 2  # the shared table plus the MCP page
+    assert js.count("function componentTable(") == 1 and js.count("function componentPage(") == 1
+
+
+def test_one_undo_function_serves_both_undo_buttons():
+    js = _static("app.js")
+    assert js.count('api("/fix/undo"') == 1, "the undo request must be written once"
+    assert "function undoFix(" in js and "undoLast" not in js
+    assert js.count("undoFix(") >= 3  # the definition and the two buttons
+
+
+def test_a_real_migration_from_the_dashboard_is_undoable_and_a_dry_run_is_not_recorded(client, workspace):
+    """N3: the page's migrate button used to move and rename files with no way back."""
+    from tests.conftest import write
+
+    wf = write(workspace / ".agents" / "workflows" / "ship.md", "---\ndescription: Ship it\n---\n1. Ship\n")
+    dry = client.post("/api/migrate", json={"dry_run": True}).json()
+    assert dry["actions"] and wf.exists() and client.get("/api/fix/plan").json()["last_batch"] is None
+    real = client.post("/api/migrate", json={"dry_run": False}).json()
+    assert real["actions"] and not wf.exists()
+    assert (workspace / ".agents" / "skills" / "ship" / "SKILL.md").is_file()
+    assert client.get("/api/fix/plan").json()["last_batch"]["fixes"] == ["agflow migrate"]
+    assert client.post("/api/fix/undo").status_code == 200
+    assert wf.is_file() and not (workspace / ".agents" / "skills" / "ship").exists()

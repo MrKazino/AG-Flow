@@ -13,7 +13,7 @@ from agflow.validate import (
     validate_rule,
     validate_skill,
 )
-from tests.conftest import write
+from tests.conftest import BUNDLED_AGENTS, BUNDLED_SKILLS, write
 
 
 def codes(issues, level=None):
@@ -29,8 +29,8 @@ def test_bundled_plugin_is_clean(plugin_dir):
     inv = plugin_inventory(plugin_dir)
     issues = validate_inventory(inv)
     assert [str(i) for i in issues if i.level != Level.INFO] == []
-    assert len(inv.of(Kind.SKILL)) == 20
-    assert len(inv.of(Kind.AGENT)) == 9
+    assert len(inv.of(Kind.SKILL)) == BUNDLED_SKILLS
+    assert len(inv.of(Kind.AGENT)) == BUNDLED_AGENTS
     assert len(inv.of(Kind.GRAPH)) == 5
 
 
@@ -230,3 +230,171 @@ def test_an_unreadable_gemini_md_is_reported_once(tmp_path):
     issues = [i for i in validate_inventory(Inventory.discover(ws, include_global=False, include_legacy=False))
               if i.path == plugin / "GEMINI.md"]
     assert len(issues) == 1, [str(i) for i in issues]
+
+
+# --- F27: the reference check and the rule-file reads stay linear -------------------------------------------------
+
+
+def _reference_ref_exists(skill_dir: Path, ref: str) -> bool:
+    """The implementation before F27, kept as the specification of what a reference may point at."""
+    suffixes = ("", ".md", ".py", ".txt", ".json", ".yaml", ".yml", ".sh", ".ps1")
+    bases = [skill_dir, skill_dir.parent, skill_dir.parent.parent]
+    if skill_dir.parent.is_dir():
+        bases += [d for d in skill_dir.parent.iterdir() if d.is_dir() and d != skill_dir]
+    return any((base / f"{ref}{suffix}").exists() for base in bases for suffix in suffixes)
+
+
+def _skills_tree(root: Path, count: int) -> list[Path]:
+    root.mkdir(parents=True, exist_ok=True)
+    (root.parent / "shared-at-grandparent.md").write_text("g", encoding="utf-8")
+    (root / "shared-at-parent.md").write_text("p", encoding="utf-8")
+    dirs = []
+    for i in range(count):
+        d = root / f"skill-{i}"
+        (d / "references").mkdir(parents=True)
+        (d / "references" / f"own-{i}.md").write_text("x", encoding="utf-8")
+        (d / "references" / "common.md").write_text("x", encoding="utf-8")
+        (d / "scripts").mkdir()
+        (d / "scripts" / f"run-{i}.py").write_text("x", encoding="utf-8")
+        (d / "SKILL.md").write_text("x", encoding="utf-8")
+        dirs.append(d)
+    return dirs
+
+
+REFS = [
+    "references/own-1", "references/own-1.md", "references/common.md", "references/common",       # next to the skill
+    "references/own-2.md", "scripts/run-3", "skill-2/SKILL.md", "skill-2/references/own-2",       # a sibling's file
+    "shared-at-parent.md", "shared-at-parent", "shared-at-grandparent", "../skill-3/SKILL.md",    # up the tree
+    "references/missing.md", "scripts/none.py", "skill-99/SKILL.md", "nowhere/at/all.txt",        # not there
+    "references", "scripts/", "skill-1", "./references/common.md", "references/../references/common.md",
+    "Skill-2/skill.md", "REFERENCES/COMMON.MD",                                                   # case differences
+]
+
+
+@pytest.mark.parametrize("ref", REFS)
+def test_ref_exists_answers_exactly_as_before_the_cache(tmp_path, ref):
+    from agflow.validate import _FsCache, _ref_exists
+
+    skills = _skills_tree(tmp_path / "plugin" / "skills", 5)
+    cache = _FsCache()
+    for skill in skills:
+        expected = _reference_ref_exists(skill, ref)
+        assert _ref_exists(skill, ref, cache) is expected, (skill.name, ref)
+        assert _ref_exists(skill, ref) is expected  # without a cache too (call-compatible)
+
+
+def _count_probes(monkeypatch, skills, refs_of):
+    import os
+
+    from agflow.validate import _FsCache, _ref_exists
+
+    real_exists, real_scandir = os.path.exists, os.scandir
+    calls = {"exists": 0, "scandir": 0}
+
+    def counting_exists(path):
+        calls["exists"] += 1
+        return real_exists(path)
+
+    def counting_scandir(path):
+        calls["scandir"] += 1
+        return real_scandir(path)
+
+    monkeypatch.setattr(os.path, "exists", counting_exists)
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    cache = _FsCache()
+    for skill in skills:
+        for ref in refs_of(skill):
+            _ref_exists(skill, ref, cache)
+    return calls
+
+
+def test_references_shared_by_many_skills_are_probed_a_linear_number_of_times(tmp_path, monkeypatch):
+    """Before F27 every reference of every skill listed and probed every other skill: ~n**2 * 9 stats per reference."""
+    n = 120
+    skills = _skills_tree(tmp_path / "plugin" / "skills", n)
+    calls = _count_probes(monkeypatch, skills, lambda skill: (
+        f"references/own-{skill.name[6:]}.md", "references/common.md", "scripts/gone.py", "references/gone.md"))
+    assert calls["scandir"] == 1, "the siblings are listed once for the skills root, not per skill or per reference"
+    assert calls["exists"] < 50 * n, calls  # measured 22 * n; the search before F27 made ~ 2200 * n for the same work
+
+
+def test_a_reference_unique_to_each_skill_costs_one_probe_per_directory_not_nine(tmp_path, monkeypatch):
+    n = 120
+    skills = _skills_tree(tmp_path / "plugin" / "skills", n)
+    calls = _count_probes(monkeypatch, skills, lambda skill: (f"other-{skill.name}/SKILL.md",))
+    assert calls["scandir"] == 1
+    assert calls["exists"] <= n * (n + 3), calls  # one probe of the first path component per candidate directory
+
+
+def test_a_rule_file_is_read_at_most_twice_by_discovery_and_validation(tmp_path, monkeypatch):
+    plugin = tmp_path / "plugin"
+    write(plugin / "plugin.json", '{"name": "p", "version": "1", "description": "d"}')
+    write(plugin / "rules" / "always.md", "---\ntrigger: always_on\ndescription: d\n---\n" + "text " * 50)
+    write(plugin / "rules" / "glob.md", "---\ntrigger: glob\nglobs: '*.py'\n---\nx\n")
+    write(plugin / "skills" / "s" / "SKILL.md",
+          "---\nname: s\ndescription: A skill used to count how often files are read during doctor.\n---\n# T\nbody\n")
+    reads: dict[Path, int] = {}
+    real = Path.read_text
+
+    def counting(self, *args, **kwargs):
+        reads[self] = reads.get(self, 0) + 1
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting)
+    inv = plugin_inventory(plugin)
+    validate_inventory(inv)
+    watched = {p: n for p, n in reads.items() if p.suffix == ".md"}
+    assert watched and max(watched.values()) <= 2, watched
+
+
+def test_the_always_on_budget_still_counts_every_always_on_rule(tmp_path):
+    plugin = tmp_path / "plugin"
+    write(plugin / "plugin.json", '{"name": "p", "version": "1", "description": "d"}')
+    for i in range(5):
+        write(plugin / "rules" / f"r{i}.md", "---\ntrigger: always_on\ndescription: d\n---\n" + "x" * 5_000)
+    issues = validate_inventory(plugin_inventory(plugin))
+    assert "context.always_on" in codes(issues, Level.WARNING)  # 25k+ chars of always-on rules
+    inv = plugin_inventory(plugin)
+    assert sum(i.meta["chars"] for i in inv.of(Kind.RULE)) > 25_000
+
+
+# --- F24b: input names ------------------------------------------------------------------------------------------------
+
+
+def graph_with_inputs(*names):
+    inputs = "".join(f"  {name}: {{type: string}}\n" for name in names)
+    return f"id: g\ntitle: G\ninputs:\n{inputs}nodes:\n  - {{id: a, agent: x}}\n"
+
+
+def test_input_names_that_break_the_node_id_style_get_a_warning_not_an_error(workspace, graphs_dir):
+    write(graphs_dir / "g.yaml", graph_with_inputs("feature", "has_ui", "bug-id", "Feature", "bugID", "1st"))
+    found = [i for i in validate_inventory(Inventory.discover(workspace)) if i.code == "graph.input.name"]
+    assert sorted(i.message.split("'")[1] for i in found) == ["1st", "Feature", "bugID"]
+    assert all(i.level == Level.WARNING and "0.5.0" in i.message for i in found)
+
+
+def test_a_hyphenated_input_name_is_valid_but_comes_with_a_hint_on_how_to_read_it(workspace, graphs_dir):
+    """N4: `bug-id` matches the node-id style, so it is not warned about; but `{{ inputs.bug-id }}` subtracts."""
+    write(graphs_dir / "g.yaml", graph_with_inputs("bug-id", "bug_id"))
+    issues = validate_inventory(Inventory.discover(workspace))
+    hint = [i for i in issues if i.code == "graph.input.hyphen"]
+    assert len(hint) == 1 and hint[0].level == Level.INFO and "inputs['bug-id']" in hint[0].message
+    assert "graph.input.name" not in codes(issues)
+
+
+def test_the_graph_still_loads_and_runs_with_such_a_name(workspace, graphs_dir):
+    """The warning is the whole change: the break is held back to 0.5.0, so a user's graph keeps working."""
+    from agflow.graph.schema import coerce_inputs, load_graph
+
+    write(graphs_dir / "g.yaml", graph_with_inputs("Feature"))
+    graph = load_graph(graphs_dir / "g.yaml")
+    assert coerce_inputs(graph, {"Feature": "x"}) == {"Feature": "x"}
+    assert "graph.invalid" not in codes(validate_inventory(Inventory.discover(workspace)))
+
+
+def test_no_bundled_graph_has_an_input_name_the_warning_would_flag():
+    from agflow.graph.schema import ID_RE, load_graph
+
+    bundled = sorted((Path(__file__).resolve().parents[1] / "plugin" / "graphs").glob("*.yaml"))
+    assert bundled
+    assert [(g.name, n) for g in bundled for n in load_graph(g).inputs if not ID_RE.match(n)] == []

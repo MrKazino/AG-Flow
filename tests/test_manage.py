@@ -12,7 +12,7 @@ from agflow.models import Kind
 from agflow.profiles import ProfileError, resolve_profile
 from agflow.sync import sync_gemini_cli
 from agflow.validate import validate_skill
-from tests.conftest import write
+from tests.conftest import BUNDLED_SKILLS, write
 
 
 def test_workflow_to_skill_is_valid(tmp_path):
@@ -82,7 +82,7 @@ def test_profiles_resolve_and_apply(workspace):
     core = resolve_profile("core")
     secure = resolve_profile("secure")
     assert set(core["skills"]) < set(secure["skills"]) and "security-auditor" in secure["agents"]
-    assert len(resolve_profile("full")["skills"]) == 20
+    assert len(resolve_profile("full")["skills"]) == BUNDLED_SKILLS
     with pytest.raises(ProfileError):
         resolve_profile("nope")
     write(paths.workspace_state_dir(workspace) / "profiles.yaml",
@@ -101,10 +101,10 @@ def test_profiles_resolve_and_apply(workspace):
     assert ws_names(Kind.AGENT) == {"implementer", "orchestrator"}
     assert mcp_registry.list_servers(f)["memory"]["disabled"] is True
     global_skills = [i for i in Inventory.discover(None).of(Kind.SKILL) if i.scope == "plugin:agflow"]
-    assert len(global_skills) == 20  # the global plugin is untouched
+    assert len(global_skills) == BUNDLED_SKILLS  # the global plugin is untouched
     assert any("disable mcp memory" in a for a in actions)
     toggles.apply_profile(workspace, resolve_profile("full", None, workspace))
-    assert len(ws_names(Kind.SKILL)) == 20
+    assert len(ws_names(Kind.SKILL)) == BUNDLED_SKILLS
 
 
 def test_sync_gemini_cli(home):

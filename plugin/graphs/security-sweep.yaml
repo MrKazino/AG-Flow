@@ -20,6 +20,7 @@ nodes:
       Audit {{ inputs.scope }} for vulnerabilities (attack surface, OWASP classes, secrets, misconfiguration).
       Write the findings report to the expected output path. Do not change code.
     outputs: ["docs/security/{{ run.id }}-code.md"]
+    evidence: required
 
   - id: dependency-audit
     title: Dependency audit
@@ -29,16 +30,36 @@ nodes:
       Audit third-party dependencies in {{ inputs.scope }} for CVEs and license risks.
       Write the report to the expected output path. Do not upgrade anything yet.
     outputs: ["docs/security/{{ run.id }}-deps.md"]
+    evidence: required
+
+  - id: verify-findings
+    title: Check the findings are real
+    agent: verifier
+    skill: verify-claims
+    depends_on: [code-audit, dependency-audit]
+    prompt: |
+      Check every finding in {{ nodes["code-audit"].outputs[0] }} and {{ nodes["dependency-audit"].outputs[0] }}
+      against the code and the lockfiles: does the cited file and line exist and contain what the finding describes,
+      is the dependency version really the one in use? Write the ledger, one row per finding, to the expected output
+      path. A refuted finding is the result, not a failure: report `succeeded` once every finding has a row, and
+      `failed` only if you could not check most of them.
+    outputs: ["docs/security/{{ run.id }}-verification.md"]
+    evidence: required
+    checks:
+      - {file: "docs/security/{{ run.id }}-verification.md", contains: ["| Claim |", "Verdict:"], min_bytes: 120}
 
   - id: triage
     title: Prioritise findings
     agent: architect
-    depends_on: [code-audit, dependency-audit]
+    depends_on: [code-audit, dependency-audit, verify-findings]
     prompt: |
       Merge and de-duplicate the findings in {{ nodes["code-audit"].outputs[0] }} and
-      {{ nodes["dependency-audit"].outputs[0] }}. Produce a prioritised remediation plan: critical/high
-      items with concrete fixes and effort; medium/low as backlog. Save it to the expected output path.
+      {{ nodes["dependency-audit"].outputs[0] }}, keeping only those the verification ledger
+      {{ nodes["verify-findings"].outputs[0] }} did not refute; list refuted ones under "Dismissed (not reproduced)"
+      with the reason. Produce a prioritised remediation plan: critical/high items with concrete fixes and effort;
+      medium/low as backlog. Save it to the expected output path.
     outputs: ["docs/security/{{ run.id }}-plan.md"]
+    evidence: required
 
   - id: approve-remediation
     type: human
@@ -75,3 +96,4 @@ nodes:
       Write the final security report: scope, tools run, findings by severity with status (fixed / accepted /
       backlog), and recommendations. Use the audit and plan documents as sources.
     outputs: ["docs/security/{{ run.id }}-report.md"]
+    evidence: required

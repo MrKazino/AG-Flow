@@ -4,21 +4,30 @@
 
   // ---------- token & API --------------------------------------------------------------
   const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-  if (params.get("token")) {
-    try { sessionStorage.setItem("agflow-token", params.get("token")); } catch (_) { /* storage blocked */ }
-    window.__agflowToken = params.get("token");
-    history.replaceState(null, "", "#/overview");
+  const query = new URLSearchParams(location.search);
+  // the token arrives in the fragment (`agflow dashboard`) or as a query parameter on the side pane's address (Antigravity)
+  const given = params.get("token") || query.get("token");
+  if (given) {
+    try { sessionStorage.setItem("agflow-token", given); } catch (_) { /* storage blocked */ }
+    window.__agflowToken = given;
+    history.replaceState(null, "", location.pathname + (location.hash.includes("token=") || !location.hash ? "#/overview" : location.hash));
   }
   const token = () => {
     try { return sessionStorage.getItem("agflow-token") || window.__agflowToken || ""; }
     catch (_) { return window.__agflowToken || ""; }
   };
 
+  // Reads started for the current page are cancelled when the user navigates on (see route()). Writes are never tied
+  // to the page: aborting a POST the user already triggered would leave them unsure whether it happened.
+  let routeSignal = null;
+
   async function api(path, opts = {}) {
+    const method = opts.method || "GET";
     const res = await fetch("/api" + path, {
-      method: opts.method || "GET",
+      method,
       headers: { "Content-Type": "application/json", "X-Agflow-Token": token() },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: method === "GET" ? routeSignal : undefined,
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || `${res.status} ${res.statusText}`);
@@ -32,7 +41,6 @@
       if (v === undefined || v === null || v === false) continue;
       if (k === "class") e.className = v;
       else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
-      else if (k === "html") e.innerHTML = v; // only used with static strings
       else e.setAttribute(k, v === true ? "" : v);
     }
     for (const c of children.flat()) {
@@ -138,7 +146,15 @@
             route();
           } }, "Install")));
     };
+    const hh = o.hook_health;
+    const guardAlarm = !hh ? null : h("div", { class: "notice err", style: "margin-bottom:16px" },
+      h("strong", {}, "Safety guard unavailable. "),
+      `agflow's hooks could not understand ${hh.total} call(s) from Antigravity in the last ${hh.window_days} days `
+      + `(${Object.entries(hh.counts).map(([k, n]) => `${k} ×${n}`).join(", ")}; last ${new Date(hh.last_seen * 1000).toLocaleString()}). `
+      + "Those calls were NOT checked by the guard. Antigravity may have changed its hook payload — see ",
+      h("a", { href: "#/doctor" }, "Doctor → hooks.guard_blind"), " for how to fix it.");
     return h("div", {},
+      guardAlarm,
       h("div", { class: "grid tiles" }, tiles.map(([k, label, page]) => h("a", { class: "tile", href: `#/${page}` },
         h("div", { class: "label" }, label),
         h("div", { class: "value" }, o.counts[k].enabled),
@@ -188,7 +204,7 @@
             h("div", { class: "muted small" }, plan.fixes.length
               ? `${nSafe} safe · ${nReview} need your choice · ${plan.manual.length} with step-by-step guidance. You see every change before it happens; everything is backed up and can be undone.`
               : "The remaining issues need a manual step — use “How to fix” on a row.")),
-          last ? h("button", { class: "ghost", onclick: () => undoLast(last) }, "Undo last fix") : null,
+          last ? h("button", { class: "ghost", onclick: () => undoFix(last) }, "Undo last fix") : null,
           plan.fixes.length ? h("button", { onclick: () => openFixDrawer(plan) }, "Fix issues…") : null)) : null,
       h("div", { class: "card" },
         h("div", { class: "row" }, badge(`${d.counts.error} errors`, d.counts.error ? "err" : "ok"), badge(`${d.counts.warning} warnings`, d.counts.warning ? "warn" : "ok"),
@@ -202,9 +218,13 @@
         box));
   };
 
-  async function undoLast(last) {
-    const when = new Date(last.time * 1000).toLocaleString();
-    if (!confirm(`Undo the fix batch from ${when}?\n\n${last.fixes.join("\n")}\n\nEvery file it changed is restored from the backup.`)) return;
+  // Undo the last fix batch: the banner on the doctor page and the result drawer both come here. `last` (the batch
+  // shown in the banner) asks for confirmation first; the drawer's button acts on fixes the user has just applied.
+  async function undoFix(last) {
+    if (last) {
+      const when = new Date(last.time * 1000).toLocaleString();
+      if (!confirm(`Undo the fix batch from ${when}?\n\n${last.fixes.join("\n")}\n\nEvery file it changed is restored from the backup.`)) return;
+    }
     const r = await act(() => api("/fix/undo", { method: "POST" }));
     toast(`Reverted ${r.fixes.length} fix(es)`);
     closeDrawer();
@@ -288,39 +308,42 @@
         r.unresolved.map(x => line("warn", "check", x.title, h("div", { class: "small muted" }, "still reported after the fix — see Doctor")))),
       r.backup_dir ? h("p", { class: "small muted" }, "Backup: ", h("code", {}, r.backup_dir)) : null,
       h("div", { class: "drawer-foot row" }, h("span", { style: "flex:1" }),
-        r.batch ? h("button", { class: "ghost", type: "button", onclick: async () => {
-          const u = await act(() => api("/fix/undo", { method: "POST" }));
-          toast(`Reverted ${u.fixes.length} fix(es)`); closeDrawer(); route();
-        } }, "Undo these fixes") : null,
+        r.batch ? h("button", { class: "ghost", type: "button", onclick: () => undoFix() }, "Undo these fixes") : null,
         h("button", { type: "button", onclick: () => { closeDrawer(); route(); } }, "Done")));
     openDrawer(r.failed.length ? "Fixes applied with problems" : "Fixes applied", body);
     route();
   }
 
-  function componentPage(kind, extraCols) {
+  // The table every component page shares: name, scope, the page's own columns, a description and the on/off switch.
+  // options: { cols: extra columns placed after Scope, describe: item -> description text }
+  function componentTable(kind, items, options = {}) {
+    return table([
+      { label: "Name", render: i => h("strong", {}, i.name) },
+      { label: "Scope", render: i => h("span", { class: "chip" }, i.scope) },
+      ...(options.cols || []),
+      { label: "Description", cls: "desc", render: options.describe || (i => i.description) },
+      { label: "On", render: i => i.scope === "legacy" ? badge("legacy", "warn") : toggleSwitch(i.enabled, `Enable ${i.name}`, async on => {
+        await act(() => api(`/items/${kind}/${encodeURIComponent(i.name)}/toggle`, { method: "POST", body: { enabled: on } }), `${on ? "Enabled" : "Disabled"} ${i.name}`);
+        route();
+      }) },
+    ], items, i => showFile(i));
+  }
+
+  // A page that is one card with an introduction and a component table. options: cols, describe (see above), intro.
+  function componentPage(kind, options = {}) {
     return async () => {
       const items = await api("/items?kind=" + kind);
-      const cols = [
-        { label: "Name", render: i => h("strong", {}, i.name) },
-        { label: "Scope", render: i => h("span", { class: "chip" }, i.scope) },
-        ...(extraCols || []),
-        { label: "Description", cls: "desc", render: i => i.description },
-        { label: "On", render: i => i.scope === "legacy" ? badge("legacy", "warn") : toggleSwitch(i.enabled, `Enable ${i.name}`, async on => {
-          await act(() => api(`/items/${kind}/${encodeURIComponent(i.name)}/toggle`, { method: "POST", body: { enabled: on } }), `${on ? "Enabled" : "Disabled"} ${i.name}`);
-          route();
-        }) },
-      ];
       return h("div", { class: "card" },
-        h("p", { class: "muted" }, "Disabling moves an item to agflow's parking area (reversible). Workspace items override plugins, which override global ones."),
-        table(cols, items, i => showFile(i)));
+        h("p", { class: "muted" }, options.intro || "Disabling moves an item to agflow's parking area (reversible). Workspace items override plugins, which override global ones."),
+        componentTable(kind, items, options));
     };
   }
 
   pages.skills = componentPage("skill");
-  pages.agents = componentPage("agent", [
+  pages.agents = componentPage("agent", { cols: [
     { label: "Model", render: i => i.meta.model || "inherit" },
     { label: "Role", render: i => [i.meta.mainAgent ? badge("main", "info") : null, i.meta.subagent ? badge("subagent", "skipped") : null] },
-  ]);
+  ] });
 
   pages.rules = async () => {
     const [g, rules] = await Promise.all([api("/gemini-md"), api("/items?kind=rule")]);
@@ -345,16 +368,10 @@
         ta, h("div", { class: "row", style: "margin-top:10px" }, h("div", { style: "flex:1" }, meter), count,
           h("button", { onclick: async () => { await act(() => api("/gemini-md", { method: "PUT", body: { content: ta.value } }), "Saved GEMINI.md (backup kept)"); } }, "Save"))),
       h("div", { class: "card" }, h("h2", {}, "Rules"),
-        table([
-          { label: "Name", render: i => h("strong", {}, i.name) },
-          { label: "Scope", render: i => h("span", { class: "chip" }, i.scope) },
-          { label: "Trigger", render: i => badge(i.meta.trigger || "missing", i.meta.trigger ? "info" : "err") },
-          { label: "Description", cls: "desc", render: i => i.description || (i.meta.globs ? `globs: ${i.meta.globs}` : "") },
-          { label: "On", render: i => i.scope === "legacy" ? badge("legacy", "warn") : toggleSwitch(i.enabled, `Enable ${i.name}`, async on => {
-            await act(() => api(`/items/rule/${encodeURIComponent(i.name)}/toggle`, { method: "POST", body: { enabled: on } }));
-            route();
-          }) },
-        ], rules, i => showFile(i))));
+        componentTable("rule", rules, {
+          cols: [{ label: "Trigger", render: i => badge(i.meta.trigger || "missing", i.meta.trigger ? "info" : "err") }],
+          describe: i => i.description || (i.meta.globs ? `globs: ${i.meta.globs}` : ""),
+        })));
   };
 
   pages.mcp = async () => {
@@ -396,7 +413,8 @@
     return h("div", { class: "card" },
       h("p", { class: "muted" }, "agflow's hooks: PreToolUse guard (deny/ask on destructive commands and secret files), PostToolUse run ledger, Stop continuation while a graph has ready nodes. Tune with .agents/agflow/guard.yaml or disable with AGFLOW_GUARD=off."),
       table([
-        { label: "Event", render: i => badge(i.meta.event, "info") },
+        { label: "Event", render: i => h("span", {}, badge(i.meta.event, "info"),
+          i.meta.inert ? h("span", { title: "Antigravity ignores this entry (wrong layout for its event): run agflow fix" }, " ", badge("ignored", "warn")) : null) },
         { label: "Matcher", render: i => h("code", {}, i.meta.matcher || "*") },
         { label: "Command", cls: "desc", render: i => h("code", {}, i.description) },
         { label: "Scope", render: i => h("span", { class: "chip" }, i.scope) },
@@ -445,8 +463,12 @@
       ta.value = detail.yaml;
       AgGraph.render(box, detail.layout);
     }
+    // Typing triggers a debounced validation; a slow answer for older text must not replace the result for newer text.
+    const validation = AgLatest.latest();
     const validate = async () => {
+      const token = validation.begin();
       const r = await api("/graphs/validate", { method: "POST", body: { yaml: ta.value } });
+      if (!validation.isCurrent(token)) return r;
       if (r.ok) { AgGraph.render(box, r.layout); msg.replaceChildren(h("div", { class: "notice ok" }, `Valid · ${r.layout.nodes.length} nodes`)); }
       else msg.replaceChildren(h("div", { class: "notice err" }, r.error));
       return r;
@@ -497,8 +519,8 @@
   }
 
   let stream = null;
-  pages.runs = async (arg) => {
-    if (arg) return runDetail(arg);
+  pages.runs = async (arg, ctx) => {
+    if (arg) return runDetail(arg, ctx);
     const runs = await api("/runs");
     return h("div", { class: "card" }, table([
       { label: "Run", render: r => h("a", { href: `#/runs/${r.run_id}` }, r.run_id) },
@@ -509,7 +531,7 @@
     ], runs, r => (location.hash = `#/runs/${r.run_id}`)));
   };
 
-  async function runDetail(runId) {
+  async function runDetail(runId, ctx) {
     const box = h("div", { class: "graph-box" });
     const head = h("div", { class: "row" });
     const nodes = h("div", {});
@@ -537,6 +559,7 @@
       ledger.textContent = d.ledger.slice(-80).map(e => `${new Date(e.ts * 1000).toLocaleTimeString()}  ${e.event.padEnd(16)} ${e.node || e.gate || ""} ${e.status || ""} ${(e.summary || e.detail || e.error || "").toString().slice(0, 140)}`).join("\n");
     };
     draw(await api(`/runs/${runId}`));
+    if (!ctx.current()) return h("div", {});  // the user already moved on: don't open a stream for a page nobody sees
     if (stream) stream.close();
     stream = liveStream(runId, draw);
     return h("div", {},
@@ -549,7 +572,17 @@
   const titles = { overview: "Overview", doctor: "Doctor", skills: "Skills", agents: "Agents", rules: "Rules & GEMINI.md",
     mcp: "MCP servers", hooks: "Hooks", plugins: "Plugins", profiles: "Profiles", graphs: "Graphs", runs: "Runs" };
 
+  // Navigating from A to B before A's data arrives must not let A's late response replace B's view. Each navigation
+  // takes a token and cancels the previous page's in-flight reads; whatever still arrives for an old token is dropped.
+  const routeGuard = AgLatest.latest();
+  let routeAbort = null;
+
   async function route() {
+    const token = routeGuard.begin();
+    if (routeAbort) routeAbort.abort();
+    routeAbort = new AbortController();
+    routeSignal = routeAbort.signal;
+    const ctx = { current: () => routeGuard.isCurrent(token) };
     const [, page = "overview", arg] = (location.hash.match(/^#\/([^/]+)(?:\/(.+))?/) || []);
     const name = pages[page] ? page : "overview";
     if (stream && !(name === "runs" && arg)) { stream.close(); stream = null; }
@@ -557,12 +590,18 @@
     document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("active", a.dataset.page === name));
     $view.replaceChildren(h("div", { class: "empty" }, "Loading…"));
     try {
-      $view.replaceChildren(await pages[name](arg && decodeURIComponent(arg)));
+      const view = await pages[name](arg && decodeURIComponent(arg), ctx);
+      if (!ctx.current()) return;
+      $view.replaceChildren(view);
     } catch (e) {
+      if (!ctx.current() || e.name === "AbortError") return;  // superseded or cancelled by a newer navigation
       $view.replaceChildren(h("div", { class: "notice err" }, e.message.includes("token")
         ? "Missing or invalid token. Open the exact URL printed by `agflow dashboard`." : e.message));
     }
   }
+
+  // The helpers manager.js builds its pages from. Pages register before the first route() (see the boot below).
+  window.AgApp = { h, api, act, badge, table, toast, openDrawer, closeDrawer, route, pages, titles };
 
   // ---------- theme & boot ----------------------------------------------------------------------
   const root = document.documentElement;
@@ -578,5 +617,7 @@
     document.getElementById("workspace").textContent = o.workspace;
     document.getElementById("version").textContent = "v" + o.version;
   }).catch(() => {});
-  route();
+  // scripts loaded after this one (manager.js) add their pages first
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", route);
+  else route();
 })();

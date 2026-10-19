@@ -31,6 +31,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agflow.fsutil import yaml_safe
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+DEFAULT_TIMEOUT_MIN = 30
+TIMEOUT_MIN_RANGE = (1, 24 * 60)  # minutes a node may be given; the headless runner clamps to the same bounds
 
 
 class GraphError(ValueError):
@@ -45,11 +47,39 @@ class InputSpec(BaseModel):
     description: str = ""
 
 
+EvidenceMode = Literal["off", "advisory", "required"]
+MAX_CHECKS = 20
+MAX_CHECK_STRINGS = 10
+
+
 class Defaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
     retries: int = Field(1, ge=0, le=10, description="extra attempts after a failed attempt")
-    timeout_min: int = Field(30, ge=1, le=24 * 60)
+    timeout_min: int = Field(DEFAULT_TIMEOUT_MIN, ge=TIMEOUT_MIN_RANGE[0], le=TIMEOUT_MIN_RANGE[1])
     max_parallel: int = Field(4, ge=1, le=64)
+    evidence: EvidenceMode = Field("advisory", description="what a failed evidence check means (see graph.verify)")
+
+
+class Check(BaseModel):
+    """A deterministic check on a file an agent claims to have produced. Nothing is executed: the engine only looks."""
+
+    model_config = ConfigDict(extra="forbid")
+    file: str = Field(min_length=1, max_length=300)
+    contains: list[str] = Field(default_factory=list)
+    not_contains: list[str] = Field(default_factory=list)
+    min_bytes: int | None = Field(None, ge=1, le=10_000_000)
+
+    @field_validator("contains", "not_contains", mode="before")
+    @classmethod
+    def _as_list(cls, v: Any) -> Any:
+        return [v] if isinstance(v, str) else v
+
+    @field_validator("contains", "not_contains")
+    @classmethod
+    def _bounded(cls, v: list[str]) -> list[str]:
+        if len(v) > MAX_CHECK_STRINGS or any(not s or len(s) > 200 for s in v):
+            raise ValueError(f"at most {MAX_CHECK_STRINGS} non-empty strings of up to 200 characters")
+        return v
 
 
 class OnFail(BaseModel):
@@ -69,11 +99,13 @@ class Node(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     when: str | None = None
     retries: int | None = Field(None, ge=0, le=10)
-    timeout_min: int | None = Field(None, ge=1, le=24 * 60)
+    timeout_min: int | None = Field(None, ge=TIMEOUT_MIN_RANGE[0], le=TIMEOUT_MIN_RANGE[1])
     outputs: list[str] = Field(default_factory=list)
     acceptance: list[str] = Field(default_factory=list)
     require: Literal["all_succeeded", "any_succeeded"] = "all_succeeded"
     on_fail: OnFail | None = None
+    evidence: EvidenceMode | None = None
+    checks: list[Check] = Field(default_factory=list, max_length=MAX_CHECKS)
 
     @field_validator("id")
     @classmethod
@@ -90,6 +122,8 @@ class Node(BaseModel):
             raise ValueError(f"{self.type} node '{self.id}' cannot set agent/skill")
         if self.type != "gate" and self.on_fail is not None:
             raise ValueError(f"only gate nodes support on_fail (node '{self.id}')")
+        if self.type != "agent" and (self.evidence is not None or self.checks):
+            raise ValueError(f"only agent nodes support evidence/checks (node '{self.id}')")
         if self.type == "gate" and not self.depends_on:
             raise ValueError(f"gate '{self.id}' must depend on the nodes it checks")
         if self.type == "human" and not self.prompt:
@@ -133,6 +167,9 @@ class Graph(BaseModel):
                 raise ValueError(f"node '{n.id}' depends on unknown node(s) {missing}")
             if n.id in n.depends_on:
                 raise ValueError(f"node '{n.id}' depends on itself")
+            repeated = sorted({d for d in n.depends_on if n.depends_on.count(d) > 1})
+            if repeated:
+                raise ValueError(f"node '{n.id}' lists the same dependency more than once: {repeated}")
         order = topo_order(self)  # raises on cycles
         for n in self.nodes:
             if n.on_fail:
@@ -156,6 +193,9 @@ class Graph(BaseModel):
 
     def timeout_for(self, node: Node) -> int:
         return self.defaults.timeout_min if node.timeout_min is None else node.timeout_min
+
+    def evidence_for(self, node: Node) -> EvidenceMode:
+        return self.defaults.evidence if node.evidence is None else node.evidence
 
 
 def topo_order(graph: Graph) -> list[str]:
@@ -210,6 +250,9 @@ def _check_templates(graph: Graph) -> None:
             e.from_string(n.prompt)
             for o in n.outputs:
                 e.from_string(o)
+            for c in n.checks:
+                for text in (c.file, *c.contains, *c.not_contains):
+                    e.from_string(text)
             if n.when:
                 e.compile_expression(n.when)
         except TemplateSyntaxError as exc:

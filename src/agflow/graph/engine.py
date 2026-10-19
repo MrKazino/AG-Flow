@@ -72,6 +72,7 @@ class NodeState(BaseModel):
     finished_at: float | None = None
     lease_expires_at: float | None = None
     history: list[dict[str, Any]] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)  # warnings from the evidence check of the accepted report
 
 
 class RunState(BaseModel):
@@ -119,8 +120,15 @@ def new_run(graph: Graph, inputs: dict[str, Any], workspace: str, *, now: float,
 # --- evaluation ---------------------------------------------------------------------------------
 
 
-def context(graph: Graph, state: RunState) -> dict[str, Any]:
-    base = {"inputs": state.inputs, "run": {"id": state.run_id, "workspace": state.workspace}}
+def _base_context(state: RunState) -> dict[str, Any]:
+    return {"inputs": state.inputs, "run": {"id": state.run_id, "workspace": state.workspace}}
+
+
+def _rendered_outputs(graph: Graph, base: dict[str, Any]) -> dict[str, list[str]]:
+    return {n.id: [_safe_render(o, base) for o in n.outputs] for n in graph.nodes}
+
+
+def _node_view(graph: Graph, state: RunState, outputs: dict[str, list[str]]) -> dict[str, Any]:
     nodes: dict[str, Any] = {}
     for n in graph.nodes:
         ns = state.nodes[n.id]
@@ -128,9 +136,34 @@ def context(graph: Graph, state: RunState) -> dict[str, Any]:
             "status": ns.status.value,
             "summary": ns.summary,
             "artifacts": list(ns.artifacts),
-            "outputs": [_safe_render(o, base) for o in n.outputs],
+            "outputs": list(outputs[n.id]),
         }
-    return {**base, "nodes": nodes}
+    return nodes
+
+
+def context(graph: Graph, state: RunState) -> dict[str, Any]:
+    base = _base_context(state)
+    return {**base, "nodes": _node_view(graph, state, _rendered_outputs(graph, base))}
+
+
+class _PassContext:
+    """The template context for the ``when`` conditions of one :func:`advance` pass.
+
+    A node's rendered ``outputs`` depend only on the inputs and the run, so they are rendered once per pass instead of
+    once per ``when`` (which compiled and rendered every node's templates again for every condition). The node view
+    (status, summary, artifacts) is rebuilt for each evaluation because decisions taken earlier in the same pass change
+    it. ``get()`` returns exactly what :func:`context` would at that moment.
+    """
+
+    def __init__(self, graph: Graph, state: RunState):
+        self.graph, self.state = graph, state
+        self._base = _base_context(state)
+        self._outputs: dict[str, list[str]] | None = None
+
+    def get(self) -> dict[str, Any]:
+        if self._outputs is None:
+            self._outputs = _rendered_outputs(self.graph, self._base)
+        return {**self._base, "nodes": _node_view(self.graph, self.state, self._outputs)}
 
 
 def _safe_render(template: str, ctx: dict[str, Any]) -> str:
@@ -138,6 +171,20 @@ def _safe_render(template: str, ctx: dict[str, Any]) -> str:
         return templating.render(template, ctx)
     except Exception:  # outputs are hints; never fail the run on them
         return template
+
+
+def render_text(template: str, ctx: dict[str, Any]) -> str:
+    """Render a template string against a context from :func:`node_context` (a bad template renders as itself)."""
+    return _safe_render(template, ctx)
+
+
+def node_context(graph: Graph, state: RunState, node_id: str) -> dict[str, Any]:
+    """The template context a node's own strings (prompt, outputs, checks) are rendered with."""
+    ctx = context(graph, state)
+    node, ns = graph.node(node_id), state.nodes[node_id]
+    ctx["node"] = {"id": node.id, "title": node.label, "attempt": ns.attempts}
+    ctx["feedback"] = list(ns.feedback)
+    return ctx
 
 
 def _set(ns: NodeState, status: Status, now: float, **fields: Any) -> None:
@@ -155,6 +202,7 @@ def advance(graph: Graph, state: RunState, *, now: float) -> list[dict[str, Any]
     if state.status == "aborted":
         return events
     order = topo_order(graph)
+    when_context = _PassContext(graph, state)
     changed = True
     while changed:
         changed = False
@@ -178,7 +226,7 @@ def advance(graph: Graph, state: RunState, *, now: float) -> list[dict[str, Any]
                 continue
             if node.when:
                 try:
-                    ok = bool(templating.evaluate(node.when, context(graph, state)))
+                    ok = bool(templating.evaluate(node.when, when_context.get()))
                 except Exception as exc:
                     _set(ns, Status.FAILED, now, error=f"`when` evaluation failed: {exc}")
                     events.append({"event": "failed", "node": nid, "error": ns.error})
@@ -293,8 +341,12 @@ def claim(graph: Graph, state: RunState, *, now: float, limit: int | None = None
 
 
 def report(graph: Graph, state: RunState, node_id: str, status: ReportStatus, *, now: float,
-           summary: str = "", artifacts: list[str] | None = None,
-           followups: list[str] | None = None) -> list[dict[str, Any]]:
+           summary: str = "", artifacts: list[str] | None = None, followups: list[str] | None = None,
+           evidence_problems: list[str] | None = None,
+           evidence_notes: list[str] | None = None) -> list[dict[str, Any]]:
+    """Record a node's result. ``evidence_problems`` / ``evidence_notes`` come from :mod:`agflow.graph.verify` (the
+    engine does no I/O): a ``succeeded`` report with problems is turned into a failed attempt whose feedback names
+    them, so the retry knows exactly what to fix."""
     if node_id not in state.nodes:
         raise EngineError(f"unknown node '{node_id}'")
     if state.status == "aborted":
@@ -307,10 +359,17 @@ def report(graph: Graph, state: RunState, node_id: str, status: ReportStatus, *,
     summary = (summary or "").strip()[:SUMMARY_MAX]
     node = graph.node(node_id)
     events: list[dict[str, Any]] = []
-    if status == "succeeded":
+    if status == "succeeded" and evidence_problems:
+        reason = ("evidence check failed: " + "; ".join(evidence_problems))[:1500]
+        events.append({"event": "evidence_rejected", "node": node_id, "problems": list(evidence_problems)})
+        events += _fail_attempt(graph, state, node, now, reason, retryable=node.type == "agent",
+                                artifacts=artifacts, followups=followups)
+    elif status == "succeeded":
         _set(ns, Status.SUCCEEDED, now, summary=summary, artifacts=list(artifacts or []),
-             followups=list(followups or []), feedback=[])
+             followups=list(followups or []), feedback=[], evidence=list(evidence_notes or [])[:10])
         events.append({"event": "succeeded", "node": node_id})
+        if evidence_notes:
+            events.append({"event": "evidence_warning", "node": node_id, "notes": list(evidence_notes)[:10]})
     else:
         events += _fail_attempt(graph, state, node, now, summary or f"reported {status}", retryable=(
             status == "failed" and node.type == "agent"), artifacts=artifacts, followups=followups)
@@ -373,8 +432,9 @@ def abort(state: RunState, reason: str, *, now: float) -> None:
 # --- views ------------------------------------------------------------------------------------------
 
 
-def build_card(graph: Graph, state: RunState, node_id: str) -> dict[str, Any]:
-    """Everything an orchestrator needs to dispatch one node to a subagent."""
+def build_card(graph: Graph, state: RunState, node_id: str, *, lessons: list[str] | None = None) -> dict[str, Any]:
+    """Everything an orchestrator needs to dispatch one node to a subagent. ``lessons`` are short sentences from
+    earlier runs of this workflow (see :mod:`agflow.learn`); the engine only carries them."""
     node = graph.node(node_id)
     ns = state.nodes[node_id]
     ctx = context(graph, state)
@@ -400,6 +460,13 @@ def build_card(graph: Graph, state: RunState, node_id: str) -> dict[str, Any]:
         "acceptance": list(node.acceptance),
         "upstream": upstream,
         "feedback": list(ns.feedback),
+        "lessons": list(lessons or []),
+        "evidence": {
+            "mode": graph.evidence_for(node) if node.type == "agent" else "off",
+            "checks": [{"file": _safe_render(c.file, ctx), "contains": [_safe_render(s, ctx) for s in c.contains],
+                        "not_contains": [_safe_render(s, ctx) for s in c.not_contains], "min_bytes": c.min_bytes}
+                       for c in node.checks],
+        },
     }
     card["subagent_prompt"] = compose_subagent_prompt(graph, state, card)
     return card
@@ -421,12 +488,39 @@ def compose_subagent_prompt(graph: Graph, state: RunState, card: dict[str, Any])
             parts.append(f"- {u['id']} [{u['status']}]: {u['summary'] or '-'}{arts}")
     if card["feedback"]:
         parts += ["", "## Feedback you must address"] + [f"- {f}" for f in card["feedback"]]
+    if card.get("lessons"):
+        parts += ["", "## Lessons from earlier runs of this workflow"] + [f"- {s}" for s in card["lessons"]]
     if card["expected_outputs"]:
         parts += ["", "## Expected outputs"] + [f"- {o}" for o in card["expected_outputs"]]
     if card["acceptance"]:
         parts += ["", "## Acceptance criteria"] + [f"- [ ] {a}" for a in card["acceptance"]]
+    parts += _evidence_section(card)
     parts += ["", f"Workspace: {state.workspace}", "", RESULT_CONTRACT]
     return "\n".join(parts)
+
+
+def _evidence_section(card: dict[str, Any]) -> list[str]:
+    """Tell the agent exactly what the engine will check when it reports, so it can meet the check the first time."""
+    ev = card.get("evidence") or {}
+    mode = ev.get("mode", "off")
+    if mode == "off" or card["type"] != "agent":
+        return []
+    head = ("a failed check sends this task back to you with the reason" if mode == "required"
+            else "findings are recorded as warnings")
+    lines = ["", f"## Evidence the engine checks when you report ({head})"]
+    for out in card["expected_outputs"]:
+        lines.append(f"- `{out}` " + ("is a folder with at least one file in it" if out.endswith(("/", "\\"))
+                                      else "exists in the workspace and is not empty"))
+    for chk in ev.get("checks", []):
+        lines.append(f"- `{chk['file']}` exists")
+        if chk.get("min_bytes"):
+            lines.append(f"  - is at least {chk['min_bytes']} bytes")
+        lines += [f"  - contains {s!r}" for s in chk.get("contains", [])]
+        lines += [f"  - does not contain {s!r}" for s in chk.get("not_contains", [])]
+    lines += ["- every file you list under `artifacts` exists in the workspace "
+              "(write `deleted: <path>` for a deletion)",
+              "- your summary names what you did and the evidence (commands run, results), not just \"done\""]
+    return lines
 
 
 def counts(state: RunState) -> dict[str, int]:

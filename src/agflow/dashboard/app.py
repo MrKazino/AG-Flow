@@ -18,7 +18,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from agflow import __version__, mcp_registry, paths, toggles
+from agflow import __version__, hook_health, mcp_registry, paths, toggles
 from agflow.fsutil import atomic_write_text, backup, timestamp
 from agflow.graph import catalog, engine
 from agflow.graph.render import to_mermaid
@@ -31,6 +31,9 @@ from agflow.validate import summarize, validate_inventory
 STATIC = Path(__file__).parent / "static"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "testserver"}
 TOKEN_HEADER = "x-agflow-token"
+SIDECAR_TOKEN_HEADER = "x-sidecar-token"   # what Antigravity's own sidecar UIs send; accepted in sidecar mode
+SIDECAR_PORT_ENV = "ANTIGRAVITY_SIDECAR_WEB_PORT"
+SIDECAR_TOKEN_ENVS = ("ANTIGRAVITY_SIDECAR_UI_TOKEN", "ANTIGRAVITY_SIDECAR_AUTH_TOKEN", "ANTIGRAVITY_SIDECAR_WEB_TOKEN")
 STREAM_PATH = re.compile(r"^/api/runs/([^/]+)/stream$")
 TICKET_TTL_SECONDS = 30.0
 TICKET_MAX = 256
@@ -92,9 +95,11 @@ def graph_layout(graph: Any) -> dict[str, Any]:
 
 def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SECONDS,
                clock: Callable[[], float] = time.monotonic, stream_seconds: float = 3600.0,
-               stream_poll: float = 1.0) -> FastAPI:
+               stream_poll: float = 1.0, sidecar: bool = False) -> FastAPI:
     """``ticket_ttl``/``clock`` make stream-ticket expiry testable; ``stream_seconds``/``stream_poll`` bound how long
-    one live stream lasts and how often it checks the run (tests shorten them so a stream ends by itself)."""
+    one live stream lasts and how often it checks the run (tests shorten them so a stream ends by itself).
+    ``sidecar``: running inside Antigravity's side pane, where the token comes from Antigravity and may also arrive as
+    its own ``x-sidecar-token`` header."""
     app = FastAPI(title="agflow dashboard", version=__version__, docs_url=None, redoc_url=None)
     ws = workspace.resolve()
     tickets = TicketStore(ticket_ttl, clock)
@@ -113,7 +118,8 @@ def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SE
                 if not tickets.redeem(ticket, stream.group(1)):
                     return JSONResponse({"detail": "missing, expired or already used stream ticket"}, status_code=401)
             else:
-                given = request.headers.get(TOKEN_HEADER, "")
+                given = request.headers.get(TOKEN_HEADER, "") or (
+                    request.headers.get(SIDECAR_TOKEN_HEADER, "") if sidecar else "")
                 if not secrets.compare_digest(given.encode("utf-8"), token.encode("utf-8")):
                     return JSONResponse({"detail": "missing or invalid token"}, status_code=401)
         return await call_next(request)
@@ -137,6 +143,7 @@ def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SE
             "doctor": summarize(issues),
             "active_runs": [_run_brief(r) for r in RunStore(ws).active()],
             "gemini_md_limit": paths.GEMINI_MD_CHAR_LIMIT,
+            "hook_health": hook_health.summary(),  # None while the safety hooks understand everything they receive
         }
 
     @app.get("/api/doctor")
@@ -308,9 +315,11 @@ def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SE
 
     @app.post("/api/migrate")
     def do_migrate(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from agflow import fixes
         from agflow.migrate import migrate_all
 
-        report = migrate_all(ws, dry_run=bool(body.get("dry_run", True)))
+        # a real run is recorded in the fix history, so "Undo last fix" reverts it
+        report = migrate_all(ws, dry_run=True) if body.get("dry_run", True) else fixes.migrate_undoable(ws)
         return {"ok": True, "actions": report.actions, "conflicts": report.conflicts}
 
     # -- graphs ---------------------------------------------------------------------------------
@@ -428,6 +437,127 @@ def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SE
         store.ledger(run_id, {"event": "aborted", "reason": reason})
         return {"ok": True}
 
+    # -- workspace ------------------------------------------------------------------------------------
+    @app.get("/api/workspaces")
+    def list_workspaces() -> dict[str, Any]:
+        """The workspace being managed and the others agflow has seen runs in (the side pane cannot know which
+        project is open, so the page offers the choice)."""
+        from agflow.graph.store import known_workspaces
+
+        known = [str(p) for p in known_workspaces()]
+        if str(ws) not in known:
+            known.insert(0, str(ws))
+        return {"current": str(ws), "known": known, "sidecar": sidecar}
+
+    @app.post("/api/workspace")
+    def set_workspace(path: str = Body(..., embed=True)) -> dict[str, Any]:
+        nonlocal ws
+        chosen = Path(path).expanduser()
+        if not chosen.is_absolute() or not chosen.is_dir():
+            raise HTTPException(400, "give the absolute path of an existing folder")
+        ws = chosen.resolve()
+        return {"workspace": str(ws)}
+
+    # -- workflows: what each needs, how its runs went, what is waiting for a decision ---------------------
+    @app.get("/api/workflows")
+    def workflows_list() -> list[dict[str, Any]]:
+        from agflow import workflows
+
+        return workflows.summary(ws)
+
+    @app.get("/api/workflows/{graph_id}")
+    def workflow_detail(graph_id: str) -> dict[str, Any]:
+        from agflow import workflows
+
+        data = workflows.detail(ws, graph_id)
+        if data.get("error") and not data.get("nodes") and "unknown workflow" in data["error"]:
+            raise HTTPException(404, data["error"])
+        return data
+
+    @app.post("/api/workflows/{graph_id}/propose")
+    def workflow_propose(graph_id: str) -> dict[str, Any]:
+        from agflow import improve, workflows
+
+        try:
+            made = improve.propose(ws, graph_id)
+        except improve.ImproveError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"proposal": workflows.proposal_row(ws, made) if made else None}
+
+    @app.post("/api/workflows/{graph_id}/undo")
+    def workflow_undo(graph_id: str, force: bool = Body(False, embed=True)) -> dict[str, Any]:
+        from agflow import improve, workflows
+
+        try:
+            return {"proposal": workflows.proposal_row(ws, improve.undo(ws, graph_id, force=force))}
+        except improve.ImproveError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/proposals/{proposal_id}/apply")
+    def proposal_apply(proposal_id: str, only: list[str] | None = Body(None, embed=True)) -> dict[str, Any]:
+        from agflow import improve, workflows
+
+        try:
+            return {"proposal": workflows.proposal_row(ws, improve.apply(ws, proposal_id, only=only or None))}
+        except improve.ImproveError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/proposals/{proposal_id}/reject")
+    def proposal_reject(proposal_id: str, reason: str = Body("", embed=True)) -> dict[str, Any]:
+        from agflow import improve, workflows
+
+        try:
+            return {"proposal": workflows.proposal_row(ws, improve.reject(ws, proposal_id, reason))}
+        except improve.ImproveError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    # -- AG-Flow's own health: Antigravity compatibility, updates, the panel itself -------------------------
+    @app.get("/api/health")
+    def health() -> dict[str, Any]:
+        """Cached and offline: what the daily check last found. The page shows it in the top bar on every screen."""
+        from agflow import compat, maintenance, sidecars, update
+
+        report = compat.load_last()
+        latest = update.ReleaseInfo.from_json(update.load_state().get("latest"))
+        return {**maintenance.health(), "sync": report.to_json() if report else None,
+                "latest": latest.to_json() if latest else None, "sidecar_mode": sidecar,
+                "sidecars": [{**s.to_json(), "steps": [] if s.ready or not (s.installed and s.valid)
+                              else sidecars.enable_steps(s.id)} for s in sidecars.status()],
+                "pill": sidecars.pill_link(), "update_config": update.load_config().to_json()}
+
+    @app.post("/api/sync/check")
+    def sync_check() -> dict[str, Any]:
+        from agflow import compat
+
+        return compat.run().to_json()
+
+    @app.post("/api/sync/apply")
+    def sync_apply(dry_run: bool = Body(True, embed=True)) -> dict[str, Any]:
+        """Re-verify AG-Flow against the installed Antigravity (doctor and the hook probe run first) and accept it."""
+        from agflow import compat
+
+        done = compat.apply(ws, dry_run=dry_run)
+        return {"report": done.report.to_json(), "problems": done.problems, "accepted": done.accepted,
+                "would_accept": done.would_accept, "notes": done.notes}
+
+    @app.post("/api/updates/check")
+    def updates_check(force: bool = Body(True, embed=True)) -> dict[str, Any]:
+        from agflow import update
+
+        return update.check(force=force).to_json()
+
+    @app.get("/api/updates/plan")
+    def updates_plan() -> dict[str, Any]:
+        """What updating would do. Looks at the release feed; changes nothing. Applying is a terminal command on
+        purpose: replacing the package under a running server is not something to trigger from its own page."""
+        from agflow import update
+        from agflow.release_feed import FeedError
+
+        try:
+            return {"plan": update.plan().to_json()}
+        except FeedError as exc:
+            return {"plan": None, "error": str(exc)}
+
     # -- static UI ----------------------------------------------------------------------------------
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -441,6 +571,51 @@ def create_app(workspace: Path, token: str, *, ticket_ttl: float = TICKET_TTL_SE
 def _run_brief(r: engine.RunState) -> dict[str, Any]:
     return {"run_id": r.run_id, "graph_id": r.graph_id, "status": r.status, "counts": engine.counts(r),
             "created_at": r.created_at, "updated_at": r.updated_at}
+
+
+class SidecarError(RuntimeError):
+    """The manager was asked to run as an Antigravity sidecar but Antigravity's handshake is not there."""
+
+
+def sidecar_settings(env: dict[str, str] | None = None) -> tuple[int, str]:
+    """``(port, token)`` Antigravity gave this sidecar. Both are required: a manager that could change files must not
+    listen without the token Antigravity hands to its pane."""
+    env = os.environ if env is None else env
+    port = (env.get(SIDECAR_PORT_ENV) or "").strip()
+    if not port.isdigit() or not 0 < int(port) < 65536:
+        raise SidecarError(f"{SIDECAR_PORT_ENV} is not set: this mode is started by Antigravity "
+                           "(in a browser use `agflow dashboard` instead)")
+    token = next((env[k].strip() for k in SIDECAR_TOKEN_ENVS if env.get(k, "").strip()), "")
+    if not token:
+        raise SidecarError("Antigravity did not give the sidecar a token (ANTIGRAVITY_SIDECAR_UI_TOKEN): refusing to "
+                           "serve an unauthenticated manager")
+    return int(port), token
+
+
+def sidecar_workspace(env: dict[str, str] | None = None, hint: Path | None = None) -> Path:
+    """Which workspace the panel starts on. Antigravity runs the sidecar from the plugin's own folder, so the project is
+    not known: the explicit hint, ``AGFLOW_WORKSPACE``, then the workspace that most recently had a run, else the
+    current folder's. The page lets the user switch."""
+    from agflow.graph.store import known_workspaces
+
+    env = os.environ if env is None else env
+    if hint is not None:
+        return hint.expanduser().resolve()
+    chosen = env.get("AGFLOW_WORKSPACE", "").strip()
+    if chosen and Path(chosen).expanduser().is_dir():
+        return Path(chosen).expanduser().resolve()
+    recent = known_workspaces(1)
+    return recent[0].resolve() if recent else paths.find_workspace()
+
+
+def serve_sidecar(workspace: Path | None = None) -> None:
+    """Run as Antigravity's side-pane panel: 127.0.0.1 only, on the port and with the token Antigravity gave us."""
+    import uvicorn
+
+    port, token = sidecar_settings()
+    ws = sidecar_workspace(hint=workspace)
+    print(f"agflow manager (sidecar) for {ws} on 127.0.0.1:{port}", flush=True)
+    uvicorn.run(create_app(ws, token, sidecar=True), host="127.0.0.1", port=port, log_level="warning")
 
 
 def serve(workspace: Path, *, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:

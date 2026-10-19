@@ -18,6 +18,9 @@ _TURBO = re.compile(r"^\s*//\s*turbo(-all)?\s*$", re.MULTILINE)
 class MigrationReport:
     actions: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
+    # Every path a (dry or real) run changes or creates. A caller that wants the run to be undoable backs these up
+    # first (``fixes.migrate_undoable``); this module itself only moves and writes.
+    touched: list[Path] = field(default_factory=list)
 
 
 def slugify(name: str) -> str:
@@ -62,6 +65,7 @@ def migrate_workflows(workspace: Path | None, *, include_global: bool = True, dr
                 continue
             bak = unique_sibling(wf)  # never onto an existing backup (Windows raises, POSIX would overwrite it)
             report.actions.append(f"workflow {wf} -> {target} (original kept as {bak.name})")
+            report.touched += [target, wf, bak]
             if not dry_run:
                 atomic_write_text(target, workflow_to_skill(wf.read_text(encoding="utf-8"), name))
                 wf.rename(bak)
@@ -81,6 +85,7 @@ def migrate_legacy_workspace(workspace: Path, *, dry_run: bool = False,
                 report.conflicts.append(f"{dest} exists; left {entry} in place")
                 continue
             report.actions.append(f"move     {entry} -> {dest}")
+            report.touched += [entry, dest]
             if not dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(entry), str(dest))
@@ -98,6 +103,7 @@ def migrate_legacy_global(*, dry_run: bool = False, report: MigrationReport | No
                 report.conflicts.append(f"{dest} exists; skipped legacy skill {entry}")
                 continue
             report.actions.append(f"copy     {entry} -> {dest}")
+            report.touched.append(dest)
             if not dry_run:
                 shutil.copytree(entry, dest)
     if old.mcp_file and old.mcp_file.is_file():
@@ -110,6 +116,7 @@ def migrate_legacy_global(*, dry_run: bool = False, report: MigrationReport | No
                 report.conflicts.append(f"MCP server '{n}' already in {new.mcp_file}; kept the 2.x entry")
         if added:
             report.actions.append(f"merge    MCP servers {added} -> {new.mcp_file}")
+            report.touched.append(new.mcp_file)  # type: ignore[arg-type]
             if not dry_run:
                 for n in added:
                     servers[n] = legacy[n]

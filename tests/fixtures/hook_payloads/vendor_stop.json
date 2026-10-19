@@ -1,0 +1,15 @@
+{
+  "_provenance": "vendor-doc",
+  "_source": "agy-customizations/docs/hooks.md, 'Stop Contract' input example",
+  "event": "stop",
+  "payload": {
+    "executionNum": 1,
+    "terminationReason": "model_stop",
+    "error": "",
+    "fullyIdle": true,
+    "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+    "workspacePaths": ["<WS>"],
+    "modelName": "auto"
+  },
+  "expect": {"problems": [], "decision": null}
+}

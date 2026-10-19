@@ -9,6 +9,15 @@ from agflow import paths
 
 REPO = Path(__file__).resolve().parents[1]
 PLUGIN = REPO / "plugin"
+# what the bundled plugin ships, counted from its folders so that adding a skill or an agent needs no test edit
+BUNDLED_SKILLS = sum(1 for p in (PLUGIN / "skills").iterdir() if p.is_dir())
+BUNDLED_AGENTS = sum(1 for p in (PLUGIN / "agents").glob("*.md"))
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--update-sdk-snapshot", action="store_true", default=False,
+                     help="rewrite tests/snapshots/google_antigravity_<version>.json from the installed SDK "
+                          "(review the diff before committing it)")
 
 
 @pytest.fixture(autouse=True, scope="session")

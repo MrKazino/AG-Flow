@@ -3,6 +3,7 @@ import json
 from typer.testing import CliRunner
 
 from agflow.cli import app
+from tests.conftest import BUNDLED_SKILLS
 
 runner = CliRunner()
 
@@ -15,7 +16,7 @@ def test_doctor_plugin_strict(plugin_dir):
     r = invoke("doctor", "--path", plugin_dir, "--strict", "--json")
     assert r.exit_code == 0, r.output
     data = json.loads(r.output)
-    assert data["counts"]["error"] == 0 and data["items"]["skill"] == 20
+    assert data["counts"]["error"] == 0 and data["items"]["skill"] == BUNDLED_SKILLS
 
 
 def test_doctor_fails_on_errors(tmp_path):

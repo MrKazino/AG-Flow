@@ -1,0 +1,43 @@
+{
+  "vocab_version": "2026.10.1",
+  "agent_tools": [
+    "list_dir", "view_file", "view_file_outline", "view_code_item", "grep_search", "find_by_name",
+    "codebase_search", "write_to_file", "replace_file_content", "multi_replace_file_content",
+    "run_command", "command_status", "send_command_input", "read_terminal", "browser_subagent",
+    "read_url_content", "search_web", "generate_image", "invoke_subagent", "define_subagent",
+    "ask_question", "notify_user", "task_boundary", "list_resources", "read_resource"
+  ],
+  "sdk_tool_map": {
+    "view_file": "view_file", "view_file_outline": "view_file", "view_code_item": "view_file",
+    "list_dir": "list_directory", "grep_search": "search_directory", "codebase_search": "search_directory",
+    "find_by_name": "find_file", "write_to_file": "create_file", "replace_file_content": "edit_file",
+    "multi_replace_file_content": "edit_file", "run_command": "run_command", "command_status": "run_command",
+    "send_command_input": "run_command", "read_terminal": "run_command", "search_web": "search_web",
+    "read_url_content": "read_url_content", "invoke_subagent": "start_subagent",
+    "define_subagent": "start_subagent", "generate_image": "generate_image"
+  },
+  "roles": {
+    "command_tool": "run_command",
+    "subagent_tool": "invoke_subagent"
+  },
+  "default_agent_tools": ["view_file", "grep_search", "list_dir"],
+  "command_tools": ["run_command"],
+  "file_tools": ["view_file", "write_to_file", "replace_file_content", "multi_replace_file_content"],
+  "agent_models": ["inherit", "pro", "flash"],
+  "model_inherit": "inherit",
+  "exec_policies": ["off", "auto", "eager", "sandbox"],
+  "rule_triggers": ["always_on", "model_decision", "glob", "manual"],
+  "hook_events": ["PreToolUse", "PostToolUse", "PreInvocation", "PostInvocation", "Stop"],
+  "hook_events_grouped": ["PreToolUse", "PostToolUse"],
+  "hook_payload_keys": {
+    "tool_call": ["toolCall"],
+    "tool_name": ["tool_name", "toolName", "tool", "name"],
+    "tool_args": ["tool_input", "toolInput", "args", "arguments", "input", "parameters"],
+    "command": ["CommandLine", "command_line", "commandLine", "command", "cmd"],
+    "path": ["AbsolutePath", "TargetFile", "FilePath", "file_path", "path", "filePath", "target_file"],
+    "workspace": ["workspacePaths", "workspace", "workspacePath", "workspace_root", "cwd", "project_dir"],
+    "common": ["conversationId", "stepIdx", "workspacePaths", "transcriptPath", "modelName"]
+  },
+  "_hook_payload_source": "tool_call/common/workspacePaths: Antigravity's own docs (agy-customizations/docs/hooks.md: toolCall {name, args}, camelCase protojson); the other variants are earlier guesses kept for compatibility",
+  "workflows_retired_on": "2026-11-01"
+}

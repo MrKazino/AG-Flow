@@ -6,9 +6,9 @@ profiles:
     skills: "*"
     agents: "*"
   core:
-    description: Planning, TDD, debugging, review, refactoring, docs and orchestration.
-    skills: [plan-spec, tdd, debug-systematic, code-review, refactor-safely, docs-writer, graph-run, graph-design, workspace-setup]
-    agents: [orchestrator, architect, implementer, tester, reviewer, researcher]
+    description: Planning, TDD, debugging, review, claim verification, research, refactoring, docs and orchestration.
+    skills: [plan-spec, tdd, debug-systematic, code-review, verify-claims, deep-research, retrospective, refactor-safely, docs-writer, graph-run, graph-design, workflow-manager, workspace-setup, compat-sync]
+    agents: [orchestrator, architect, implementer, tester, reviewer, verifier, researcher]
   secure:
     description: Core + security audit, dependency audit, performance and coverage.
     extends: core

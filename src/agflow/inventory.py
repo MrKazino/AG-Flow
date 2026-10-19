@@ -8,19 +8,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agflow import frontmatter, paths
+from agflow import frontmatter, hookfile, parking, paths
 from agflow.fsutil import read_json
-from agflow.models import Item, Kind
+from agflow.models import TOGGLEABLE, Item, Kind
 from agflow.paths import Layout, Scope
 
 
-def _meta_of(path: Path) -> tuple[dict[str, Any], str, str | None]:
-    """Return (frontmatter, body, parse error)."""
+def _meta_of(path: Path) -> tuple[dict[str, Any], str, int, str | None]:
+    """Return (frontmatter, body, size in characters, error); the file is read once."""
     try:
-        meta, body = frontmatter.parse(path.read_text(encoding="utf-8"))
-        return meta, body, None
-    except (frontmatter.FrontmatterError, UnicodeDecodeError, OSError) as exc:
-        return {}, "", str(exc)
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as exc:
+        return {}, "", 0, str(exc)
+    try:
+        meta, body = frontmatter.parse(text)
+    except frontmatter.FrontmatterError as exc:
+        return {}, "", len(text), str(exc)
+    return meta, body, len(text), None
+
+
+def _leak(movable: Path) -> dict[str, Any]:
+    """Item fields for something agflow disabled that is nevertheless in a scanned location (it carries its marker).
+
+    Antigravity does not know the marker and loads such an item; agflow reports it as disabled, and doctor says so
+    (``disabled.marker_leak``).
+    """
+    if not parking.has_marker(movable):
+        return {}
+    return {"leaked_marker": parking.read_marker(movable)}
 
 
 def iter_skills(skills_dir: Path | None) -> Iterable[Path]:
@@ -68,6 +83,7 @@ class Inventory:
     load_errors: list[tuple[Path, str]] = field(default_factory=list)
     # disabled-index entries whose parked copy is gone: (index file, entry, original still in place?)
     stale_disabled: list[tuple[Path, dict[str, Any], bool]] = field(default_factory=list)
+    state_dirs: list[Path] = field(default_factory=list)  # where parked items were looked for
 
     # -- queries -------------------------------------------------------------------------
     def of(self, kind: Kind, *, enabled: bool | None = True) -> list[Item]:
@@ -130,6 +146,7 @@ class Inventory:
                 inv.sources.append((layout.gemini_md, scope_label))
             inv._scan_layout(layout, scope_label)
         for state_dir in _state_dirs(workspace, include_global):
+            inv.state_dirs.append(state_dir)
             inv._scan_disabled(state_dir)
         return inv
 
@@ -183,22 +200,26 @@ class Inventory:
             self._add(Kind.GEMINI_MD, "GEMINI.md", lay.gemini_md, scope,
                       meta={"chars": chars, **({"unreadable": True} if unreadable else {})})
         for p in iter_markdown(lay.rules_dir):
-            meta, _, _ = _meta_of(p)  # parse errors are reported by validate.validate_rule
-            self._add(Kind.RULE, p.stem, p, scope, description=str(meta.get("description", "")),
-                      meta={"trigger": meta.get("trigger"), "globs": meta.get("globs")})
+            meta, _, chars, _ = _meta_of(p)  # parse errors are reported by validate.validate_rule
+            leak = _leak(p)
+            self._add(Kind.RULE, p.stem, p, scope, description=str(meta.get("description", "")), enabled=not leak,
+                      meta={"trigger": meta.get("trigger"), "globs": meta.get("globs"), "chars": chars, **leak})
         for p in iter_skills(lay.skills_dir):
-            meta, _, _ = _meta_of(p)
+            meta, *_ = _meta_of(p)
+            leak = _leak(p.parent)
             self._add(Kind.SKILL, str(meta.get("name") or p.parent.name), p, scope,
-                      description=str(meta.get("description", "")), meta={"folder": p.parent.name})
+                      description=str(meta.get("description", "")), enabled=not leak,
+                      meta={"folder": p.parent.name, **leak})
         for p in iter_agents(lay.agents_dir):
-            meta, _, _ = _meta_of(p)
+            meta, *_ = _meta_of(p)
+            leak = _leak(p.parent if p.name == "agent.md" else p)
             self._add(Kind.AGENT, str(meta.get("name") or agent_name_from_path(p)), p, scope,
-                      description=str(meta.get("description", "")),
-                      meta={k: meta.get(k) for k in ("model", "mainAgent", "subagent", "tools",
-                                                      "commandExecutionPolicy")})
+                      description=str(meta.get("description", "")), enabled=not leak,
+                      meta={**{k: meta.get(k) for k in ("model", "mainAgent", "subagent", "tools",
+                                                         "commandExecutionPolicy")}, **leak})
         for wdir in lay.workflows_dirs:
             for p in iter_markdown(wdir):
-                meta, _, _ = _meta_of(p)
+                meta, *_ = _meta_of(p)
                 self._add(Kind.WORKFLOW, p.stem, p, scope, description=str(meta.get("description", "")))
         if lay.mcp_file and lay.mcp_file.is_file():
             servers = self._json_object(lay.mcp_file).get("mcpServers", {}) or {}
@@ -207,13 +228,10 @@ class Inventory:
                 self._add(Kind.MCP, name, lay.mcp_file, scope, enabled=not cfg.get("disabled", False),
                           description=_describe_mcp(cfg), meta={"config": cfg})
         if lay.hooks_file and lay.hooks_file.is_file():
-            hooks = self._json_object(lay.hooks_file).get("hooks", {}) or {}
-            for event, entries in hooks.items() if isinstance(hooks, dict) else []:
-                for idx, entry in enumerate(entries if isinstance(entries, list) else []):
-                    entry = entry if isinstance(entry, dict) else {}
-                    self._add(Kind.HOOK, f"{event}#{idx}", lay.hooks_file, scope,
-                              description=str(entry.get("command", "")),
-                              meta={"event": event, "matcher": entry.get("matcher")})
+            for ref in hookfile.handlers(self._json_object(lay.hooks_file)):
+                self._add(Kind.HOOK, f"{ref.hook}:{ref.event}#{ref.number}", lay.hooks_file, scope,
+                          description=str(ref.handler.get("command", "")), enabled=ref.enabled,
+                          meta={"event": ref.event, "matcher": ref.matcher, "hook": ref.hook, "inert": ref.inert})
         for p in iter_graphs(lay.graphs_dir):
             self._add(Kind.GRAPH, p.stem, p, scope)
 
@@ -222,7 +240,7 @@ class Inventory:
         index = self._json(index_file, []) or []
         if not isinstance(index, list):
             self.load_errors.append((index_file, f"expected a JSON list of entries, got {type(index).__name__}"))
-            return
+            index = []  # the markers below can still list what is parked
         for n, entry in enumerate(index):
             try:
                 kind, name = Kind(entry["kind"]), entry["name"]
@@ -236,6 +254,21 @@ class Inventory:
                           meta={"original_path": original})
             else:
                 self.stale_disabled.append((index_file, entry, Path(str(original)).exists()))
+        # A parked item whose index entry was lost (or never written) still carries its marker: list it, so that it is
+        # neither invisible nor impossible to enable. The folder it sits in names its kind if the marker cannot.
+        indexed = [e["parked_path"] for e in index if isinstance(e, dict) and isinstance(e.get("parked_path"), str)]
+        for movable, marker in parking.parked_items(state_dir / "disabled"):
+            if any(parking.same_path(movable, p) for p in indexed):
+                continue
+            kind_dir = movable.parent.parent.name
+            try:
+                kind = Kind(marker.get("kind") or kind_dir.removesuffix("s"))
+            except ValueError:
+                continue
+            if kind not in TOGGLEABLE:
+                continue
+            self._add(kind, str(marker.get("name") or movable.stem), movable, str(marker.get("scope") or "?"),
+                      enabled=False, meta={"original_path": marker.get("original_path"), "recovered": True})
 
 
 def _state_dirs(workspace: Path | None, include_global: bool) -> list[Path]:

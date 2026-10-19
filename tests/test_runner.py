@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 
 import pytest
@@ -34,7 +35,7 @@ def test_bundled_graphs_listed(workspace):
 @pytest.mark.parametrize("graph_id", sorted(INPUTS))
 def test_bundled_graph_runs_to_success(workspace, graph_id):
     store, state = start(workspace, graph_id, INPUTS[graph_id])
-    backend = FakeBackend()
+    backend = FakeBackend(workspace=workspace)  # writes placeholders for the declared outputs (evidence is required)
     final = asyncio.run(run_graph(store, state.run_id, backend, approve_human=True))
     assert final.status == "succeeded", final.nodes
     assert exit_code(final) == EXIT_OK
@@ -88,8 +89,10 @@ def test_interrupt_releases_running_nodes(workspace):
     store, state = start(workspace, "bugfix", INPUTS["bugfix"])
 
     async def go():
-        task = asyncio.create_task(run_graph(store, state.run_id, FakeBackend(delay=5)))
-        await asyncio.sleep(0.2)
+        started = asyncio.Event()
+        backend = FakeBackend(delay=5, on_run=lambda card: started.set())
+        task = asyncio.create_task(run_graph(store, state.run_id, backend))
+        await asyncio.wait_for(started.wait(), timeout=30)  # a node is running now; interrupt at exactly that point
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -106,6 +109,60 @@ def test_parse_result_text():
     assert parse_result_text("no json here").status == "failed"
     two = '```json\n{"status": "failed", "summary": "old"}\n```\n```json\n{"status": "rejected", "summary": "new"}\n```'
     assert parse_result_text(two).summary == "new"
+
+
+# --- F22: the result block is read by a JSON parser, not a pattern -----------------------------------------------
+
+
+def _fenced(payload: str, lang: str = "json") -> str:
+    return f"```{lang}\n{payload}\n```"
+
+
+def test_a_brace_and_a_fence_inside_a_string_do_not_end_the_block_early():
+    payload = json.dumps({"status": "succeeded", "summary": "the template ends with } ``` and still works"})
+    result = parse_result_text("done\n" + _fenced(payload))
+    assert (result.status, result.summary) == ("succeeded", "the template ends with } ``` and still works")
+
+
+def test_a_fence_quoted_in_a_string_is_not_taken_for_a_second_result():
+    inner = json.dumps({"status": "failed", "summary": "quoted"})
+    outer = json.dumps({"status": "succeeded", "summary": f"I saw ```json\n{inner}\n``` in the log"})
+    assert parse_result_text(_fenced(outer)).status == "succeeded"
+
+
+def test_a_top_level_array_yields_its_last_valid_result():
+    items = [{"status": "failed", "summary": "first"}, {"nope": 1}, {"status": "rejected", "summary": "last"}, 7]
+    assert parse_result_text(_fenced(json.dumps(items))).summary == "last"
+    assert parse_result_text(_fenced("[]")).status == "failed"
+
+
+def test_nested_objects_and_unfenced_prose_braces():
+    extra = {"deep": {"x": [1, {"y": 2}]}}
+    payload = json.dumps({"status": "succeeded", "summary": "ok", "artifacts": ["a"], "extra": extra})
+    text = "I changed {config} and {more}, then ran it.\n" + _fenced(payload) + "\nThanks! {done}"
+    result = parse_result_text(text)
+    assert (result.status, result.artifacts) == ("succeeded", ["a"])
+
+
+def test_the_last_valid_block_wins_and_an_invalid_later_one_is_skipped():
+    good = _fenced(json.dumps({"status": "succeeded", "summary": "good"}))
+    bad_schema = _fenced(json.dumps({"status": "great", "summary": "bad"}))
+    broken = _fenced('{"status": "succeeded", "summary": ')
+    assert parse_result_text(f"{good}\n{bad_schema}\n{broken}").summary == "good"
+
+
+@pytest.mark.parametrize("text", [
+    "", None, "no json at all", "```json\n```", "```\nnot json\n```", '```json\n{"status": "succeeded"}\n```',
+    '{"status": "succeeded", "summary": "unfenced"}', '```json\n{"status": "succeeded", "summary": "x"} junk\n```',
+    "```json\n" + "[" * 5000 + "\n```",
+])
+def test_a_reply_without_a_valid_fenced_result_is_a_failure_that_shows_the_tail(text):
+    result = parse_result_text(text)
+    assert result.status == "failed" and "no valid result JSON block" in result.summary
+
+
+def test_a_language_tag_is_optional():
+    assert parse_result_text(_fenced('{"status": "succeeded", "summary": "s"}', lang="")).status == "succeeded"
 
 
 # --- F2: a concurrent report (e.g. the MCP orchestrator) must not destroy the run --------------------------------
@@ -174,3 +231,21 @@ def test_unrelated_exceptions_still_stop_the_run(workspace, monkeypatch):
     monkeypatch.setattr(runner_module, "_report", broken)
     with pytest.raises(RuntimeError, match="disk on fire"):
         asyncio.run(run_graph(store, state.run_id, FakeBackend()))
+
+
+def test_a_report_that_cannot_be_recorded_gives_the_node_back_instead_of_leaving_it_running(workspace, monkeypatch):
+    """N9: the finished task had already been dropped from the in-flight set, so when recording its result failed
+    (a full disk, a lock that timed out) the node stayed `running` until its 30-minute lease ran out."""
+    store, state = start(workspace, "bugfix", INPUTS["bugfix"])
+
+    def cannot_record(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner_module, "_report", cannot_record)
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(run_graph(store, state.run_id, FakeBackend()))
+    after = store.load(state.run_id)
+    running = [nid for nid, ns in after.nodes.items() if ns.status.value == "running"]
+    assert running == [], f"left running with a lease: {running}"
+    assert all(ns.attempts == 0 for ns in after.nodes.values()), "the failed recording must not cost an attempt"
+    assert [e["event"] for e in store.read_ledger(state.run_id)][-1] == "interrupted"

@@ -153,3 +153,39 @@ async def test_graph_status_without_a_run_id_still_reports_no_runs(workspace):
     async with Client(build_server()) as c:
         result = await call(c, "graph_status", workspace=str(workspace))
     assert result["ok"] is False and "no runs" in result["error"]
+
+
+# --- F18: the run -> workspace cache of a long-lived server must be bounded ------------------------------------------
+
+
+def test_workspace_cache_is_capped_and_evicts_least_recently_used(tmp_path, monkeypatch):
+    from agflow import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_workspaces", mcp_server.OrderedDict())
+    monkeypatch.setattr(mcp_server, "WORKSPACE_CACHE_MAX", 5)
+    for n in range(5):
+        mcp_server._remember(f"run-{n}", tmp_path / f"ws{n}")
+    assert mcp_server._resolve_workspace(None, "run-0") == tmp_path / "ws0"  # run-0 is now the most recently used
+    for n in range(5, 9):
+        mcp_server._remember(f"run-{n}", tmp_path / f"ws{n}")
+    assert len(mcp_server._workspaces) == 5
+    assert "run-0" in mcp_server._workspaces and "run-1" not in mcp_server._workspaces  # the stale ones went
+    assert list(mcp_server._workspaces)[-1] == "run-8"
+
+
+def test_a_started_run_is_still_found_after_the_cache_forgets_it(workspace, graphs_dir, monkeypatch):
+    """Eviction must never lose a run: the on-disk index (written at start) still resolves it."""
+    from agflow import mcp_server
+
+    write(graphs_dir / "mini.yaml", GRAPH)
+
+    async def go():
+        async with Client(build_server()) as c:
+            started = await call(c, "graph_start", graph="mini", workspace=str(workspace), inputs={"goal": "x"})
+            mcp_server._workspaces.clear()
+            nxt = await call(c, "graph_next", run_id=started["run_id"])  # no workspace given, cache is empty
+            assert nxt["ok"] is True and [card["node_id"] for card in nxt["cards"]] == ["plan"]
+
+    import asyncio
+
+    asyncio.run(go())

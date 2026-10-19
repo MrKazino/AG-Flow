@@ -1,0 +1,7 @@
+{
+  "_provenance": "synthetic",
+  "_source": "the flat snake_case shape agflow 0.2.0 guessed (tool_name + tool_input); kept working for compatibility",
+  "event": "pre-tool-use",
+  "payload": {"tool_name": "run_command", "tool_input": {"CommandLine": "rm -rf /"}, "cwd": "<WS>"},
+  "expect": {"problems": [], "decision": "deny"}
+}

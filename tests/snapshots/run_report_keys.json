@@ -1,0 +1,30 @@
+{
+  "counts": {
+    "blocked": "<value>",
+    "failed": "<value>",
+    "pending": "<value>",
+    "running": "<value>",
+    "skipped": "<value>",
+    "succeeded": "<value>"
+  },
+  "graph_id": "<value>",
+  "inputs": "<map>",
+  "next_action": "<value>",
+  "nodes": [
+    {
+      "agent": "<value>",
+      "attempts": "<value>",
+      "id": "<value>",
+      "status": "<value>",
+      "summary": "<value>",
+      "type": "<value>"
+    }
+  ],
+  "ready": "<list>",
+  "rework_loops": "<map>",
+  "run_id": "<value>",
+  "running": "<list>",
+  "status": "<value>",
+  "waiting_on_human": "<list>",
+  "workspace": "<value>"
+}

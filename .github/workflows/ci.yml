@@ -10,12 +10,20 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python: ["3.10", "3.12", "3.13", "3.14"]
+        include:
+          # one interpreter each keeps the matrix small and still runs the Windows and macOS code paths
+          - { os: windows-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -26,7 +34,12 @@ jobs:
         run: uv sync --all-extras --locked
       - name: Lint
         run: uv run ruff check src tests scripts
+      - name: Tests (coverage floor on the reference job)
+        # The floor is not in pytest's addopts so that running one test file locally does not fail on it.
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.12' }}
+        run: uv run pytest -q --cov=agflow --cov-report=term-missing:skip-covered --cov-fail-under=88
       - name: Tests
+        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.python == '3.12') }}
         run: uv run pytest -q
       - name: Validate bundled plugin
         run: uv run agflow doctor --path plugin --strict
